@@ -1,0 +1,1117 @@
+---
+title: "FACTS: Murine In Vivo and In Vitro Analyses"
+subtitle: "C. albicans Lung Injury Models — Publication Analysis Code"
+author: "Kitsios Lab, University of Pittsburgh"
+date: "July 2026"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: hide
+    theme: cosmo
+---
+
+# FACTS In Vivo / In Vitro Analysis
+
+Analysis code for murine intratracheal *C. albicans* models and in vitro lung epithelial assays.
+
+**Required input files:**
+
+- `FACTS_rawdata_allExp_06.29.26.xlsx` — Master experimental dataset
+- `FACTS_histologyScores_12.5.24_merged.xlsx` — Two-hit histology scoring
+- `FACTS_histologyScores_4.9.25_LS.xlsx` — Single-hit histology scoring
+- `humanInvitroData.xlsx` — Human in vitro cytotoxicity and TEER data
+
+---
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6,
+  dpi = 300
+)
+```
+
+```{r load_libraries}
+# =============================================================================
+# Required packages
+# =============================================================================
+library(dplyr)
+library(readxl)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(ggbeeswarm)
+library(ggpubr)
+library(ggsci)
+library(patchwork)
+library(scales)
+library(survival)
+library(survminer)
+library(nlme)
+```
+
+## Data Import and Processing
+
+```{r load_data}
+# =============================================================================
+# Data Import and Derived Variables
+# =============================================================================
+
+# --- Load raw data ---
+facts <- read_excel("FACTS_rawdata_allExp_06.29.26.xlsx")
+histology2hit <- read_excel("FACTS_histologyScores_12.5.24_merged.xlsx")
+histology1hit <- read_excel("FACTS_histologyScores_4.9.25_LS.xlsx")
+
+# --- Normalized lung weight (left lung / body weight on sacrifice day) ---
+facts <- facts %>%
+  mutate(LungWeightNormalized = case_when(
+    Sacrifice_day == 1 ~ LeftLung_weight / bodyweightD1,
+    Sacrifice_day == 2 ~ LeftLung_weight / bodyweightD2,
+    Sacrifice_day == 3 ~ LeftLung_weight / bodyweightD3,
+    Sacrifice_day == 4 ~ LeftLung_weight / bodyweightD4,
+    Sacrifice_day == 7 ~ LeftLung_weight / bodyweightD7
+  ))
+
+# --- Weight loss fraction per day (relative to Day 0) ---
+for (d in 1:7) {
+  wt_col <- paste0("bodyweightD", d)
+  facts[[paste0("d", d, "weightloss")]] <-
+    (facts$bodyweightD0 - facts[[wt_col]]) / facts$bodyweightD0
+}
+
+# --- Percent body weight per day (1 = baseline) ---
+facts$d0weightpercent <- 1
+for (d in 1:7) {
+  facts[[paste0("d", d, "weightpercent")]] <-
+    1 - facts[[paste0("d", d, "weightloss")]]
+}
+
+# --- Total BAL neutrophils ---
+facts$BAL_Neutrophils_total <-
+  (facts$BALNeutrophils_percent * facts$BALcellcount) / 100
+
+# --- Experiment summary ---
+experiment_summary <- facts %>%
+  group_by(experiment) %>%
+  summarise(
+    n = n(),
+    groups = paste(sort(unique(group)), collapse = " | "),
+    genotypes = paste(sort(unique(genotype)), collapse = " | "),
+    sex = paste(sort(unique(sex)), collapse = " | "),
+    sacrifice_days = paste(sort(unique(Sacrifice_day)), collapse = " | "),
+    .groups = "drop"
+  )
+
+print(experiment_summary, n = 50)
+```
+
+---
+
+## Figure 2: Intratracheal *C. albicans* Causes Acute Lung Injury
+
+```{r figure2}
+# =============================================================================
+# Figure 2: CAN6 vs Vehicle (Day 1 & 2)
+# Experiments 2, 9, 10, 11, 14, 21 — WT mice
+# =============================================================================
+
+# --- Data subset ---
+fig2_data <- facts %>%
+  filter(experiment %in% c(2, 9, 10, 11, 14, 21),
+         group %in% c("CAN6", "Veh"),
+         genotype == "WT") %>%
+  mutate(group = factor(group, levels = c("Veh", "CAN6")))
+
+# --- Shared aesthetics ---
+fig2_colors <- c("Veh" = "gray40", "CAN6" = "#D62728")
+fig2_comparisons <- list(c("Veh", "CAN6"))
+sacrifice_day_labels <- c("1" = "Day 1", "2" = "Day 2")
+
+# --- Common theme ---
+theme_fig2 <- function() {
+  theme_pubr(base_size = 10) %+replace%
+    theme(
+      legend.position = "none",
+      strip.background = element_blank(),
+      strip.text = element_text(size = 10, face = "bold"),
+      axis.title.y = element_text(size = 9, angle = 90),
+      axis.text.x = element_text(size = 9),
+      axis.text.y = element_text(size = 8),
+      plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+      plot.margin = margin(4, 4, 4, 4)
+    )
+}
+
+# --- Helper: faceted boxplot + beeswarm ---
+fig2_boxplot <- function(data, yvar, ylab, title,
+                         ylimits = NULL, ybreaks = waiver()) {
+  p <- ggplot(data, aes(x = group, y = .data[[yvar]], color = group)) +
+    geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+    geom_beeswarm(size = 1.2, cex = 2) +
+    stat_compare_means(comparisons = fig2_comparisons, size = 3,
+                       label = "p.format", bracket.size = 0.4) +
+    scale_color_manual(values = fig2_colors) +
+    facet_grid(~ Sacrifice_day,
+               labeller = labeller(Sacrifice_day = sacrifice_day_labels)) +
+    labs(x = NULL, y = ylab, title = title) +
+    theme_fig2()
+  if (!is.null(ylimits)) {
+    p <- p + scale_y_continuous(limits = ylimits, breaks = ybreaks)
+  }
+  p
+}
+
+# --- Panel B: Weight trajectory ---
+fig2_wt_long <- fig2_data %>%
+  dplyr::select(mouseID, group, d0weightpercent, d1weightpercent, d2weightpercent) %>%
+  pivot_longer(cols = d0weightpercent:d2weightpercent,
+               names_to = "Day", values_to = "WeightPct") %>%
+  mutate(Day = factor(Day,
+    levels = c("d0weightpercent", "d1weightpercent", "d2weightpercent"),
+    labels = c("Day 0", "Day 1", "Day 2")))
+
+fig2_wt_summary <- fig2_wt_long %>%
+  group_by(group, Day) %>%
+  summarise(
+    median = median(WeightPct, na.rm = TRUE),
+    q25 = quantile(WeightPct, 0.25, na.rm = TRUE),
+    q75 = quantile(WeightPct, 0.75, na.rm = TRUE),
+    .groups = "drop")
+
+fig2B <- ggplot(fig2_wt_summary,
+                aes(x = Day, y = median, group = group, color = group)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.15, linewidth = 0.5) +
+  scale_color_manual(values = fig2_colors) +
+  scale_y_continuous(limits = c(0.9, 1.05), labels = scales::percent) +
+  labs(x = NULL, y = "Body Weight (% baseline)", color = NULL) +
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "top", legend.key.size = unit(0.4, "cm"),
+        plot.margin = margin(4, 4, 4, 4),
+        panel.grid.major = element_line(color = "grey90", linewidth = 0.3)) +
+  ggtitle("Weight Change by Group")
+
+# --- Panels C–I: Faceted boxplots ---
+fig2_data$BAL_IgM <- as.numeric(fig2_data$BAL_IgM)
+
+fig2C <- fig2_boxplot(fig2_data, "LungWeightNormalized",
+  ylab = "Lung Weight / BW (mg/g)", title = "Normalized Lung Weight", ylimits = c(0, 7))
+fig2D <- fig2_boxplot(fig2_data, "BAL_totalProtein",
+  ylab = "BAL Protein (mg/ml)", title = "BAL Protein")
+fig2E <- fig2_boxplot(fig2_data, "BAL_IgM",
+  ylab = "BAL IgM (ng/ml)", title = "BAL IgM",
+  ylimits = c(0, 8000), ybreaks = seq(0, 8000, 2000))
+fig2F <- fig2_boxplot(fig2_data, "BAL_RAGE",
+  ylab = "BAL sRAGE (pg/ml)", title = "BAL sRAGE",
+  ylimits = c(0, 20000), ybreaks = seq(0, 20000, 5000))
+fig2G <- fig2_boxplot(fig2_data, "BALcellcount",
+  ylab = expression("BAL Cells (" * 10^4 * ")"), title = "BAL Cell Count",
+  ylimits = c(0, 800), ybreaks = seq(0, 800, 200))
+fig2H <- fig2_boxplot(fig2_data, "BAL_Neutrophils_total",
+  ylab = expression("BAL PMNs (" * 10^4 * ")"), title = "BAL Neutrophils",
+  ylimits = c(0, 800), ybreaks = seq(0, 800, 200))
+fig2I <- fig2_boxplot(fig2_data, "NeutElastase",
+  ylab = "BAL NE (pg/ml)", title = "Neutrophil Elastase",
+  ylimits = c(0, 12000), ybreaks = seq(0, 12000, 4000))
+
+# --- Panel J: Histology score ---
+histology1hit$group <- case_when(
+  histology1hit$Mouse %in% c("m1","m3","m7","m8") ~ "Veh",
+  histology1hit$Mouse %in% c("m2","m4","m5","m6","m9") ~ "CAN6",
+  TRUE ~ NA_character_
+)
+histology1hit <- histology1hit %>% filter(!is.na(group))
+histology1hit$group <- factor(histology1hit$group, levels = c("Veh", "CAN6"))
+
+fig2J <- ggplot(histology1hit,
+                aes(x = group, y = ScorePerField, color = group)) +
+  geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+  geom_jitter(width = 0.15, size = 1.2, alpha = 0.6) +
+  stat_compare_means(comparisons = fig2_comparisons, size = 3,
+                     label = "p.format", bracket.size = 0.4) +
+  scale_color_manual(values = fig2_colors) +
+  labs(x = NULL, y = "Histology Score", title = "Histology Score") +
+  theme_fig2()
+
+# --- Placeholders ---
+fig2A <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "(schematic)", size = 5, color = "grey60")
+fig2K <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "(histology images)", size = 5, color = "grey60")
+
+# --- Assembly ---
+fig2_top    <- fig2A + fig2B + fig2C + plot_layout(nrow = 1, widths = c(1.5, 1.2, 0.8))
+fig2_middle <- fig2D + fig2E + fig2F + fig2I + plot_layout(nrow = 1)
+fig2_bottom <- fig2G + fig2H + fig2J + fig2K +
+  plot_layout(nrow = 1, widths = c(1, 1, 0.7, 1.3))
+
+fig2 <- fig2_top / fig2_middle / fig2_bottom +
+  plot_annotation(tag_levels = "A",
+    theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+
+ggsave("Figure2_R.pdf", fig2, width = 10, height = 10)
+```
+
+## Supplemental: CFUs and Histology Features (CAN6 vs Veh)
+
+```{r supp_cfus_histology}
+# =============================================================================
+# Supplemental: C. albicans CFUs (Day 2, CAN6 vs Veh)
+# =============================================================================
+
+fig2_cfu_data <- fig2_data %>%
+  filter(Sacrifice_day == 2) %>%
+  dplyr::select(mouseID, group, LeftLung_CanCFUs, BAL_CanCFUs) %>%
+  pivot_longer(cols = c(LeftLung_CanCFUs, BAL_CanCFUs),
+               names_to = "Compartment", values_to = "CFUs") %>%
+  mutate(
+    log10CFU = log10(CFUs + 1),
+    Compartment = factor(Compartment,
+      levels = c("BAL_CanCFUs", "LeftLung_CanCFUs"),
+      labels = c("BAL (CFUs/ml)", "Lung (CFUs/g)"))
+  )
+
+fig_supp_CFUs <- ggplot(fig2_cfu_data,
+    aes(x = group, y = log10CFU, color = group)) +
+  geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+  geom_beeswarm(size = 1.2, cex = 2) +
+  stat_compare_means(comparisons = fig2_comparisons, size = 3,
+                     label = "p.format", bracket.size = 0.4) +
+  scale_color_manual(values = fig2_colors) +
+  facet_wrap(~ Compartment) +
+  labs(x = NULL,
+       y = expression(log[10] ~ italic("C. albicans") ~ "CFUs"),
+       title = expression(italic("C. albicans") ~ "Recovery (Day 2)")) +
+  theme_fig2()
+
+ggsave("FigS_CFUs_CAN6.pdf", fig_supp_CFUs, width = 5, height = 4)
+
+# =============================================================================
+# Supplemental: Histologic Injury Features (CAN6 vs Veh)
+# =============================================================================
+
+# Average across reviewers per field
+histology1hit_avg <- histology1hit %>%
+  group_by(Mouse, Field) %>%
+  summarise(
+    NeutrophilsAlveolarSpace = mean(NeutrophilsAlveolarSpace, na.rm = TRUE),
+    NeutrophilsInterstitialSpace = mean(NeutrophilsInterstitialSpace, na.rm = TRUE),
+    HyalineMembranes = mean(HyalineMembranes, na.rm = TRUE),
+    ProteinaceousDebrisAirspaces = mean(ProteinaceousDebrisAirspaces, na.rm = TRUE),
+    AlveolarSeptalThickening = mean(AlveolarSeptalThickening, na.rm = TRUE),
+    ScorePerField = mean(ScorePerField, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+histology1hit_avg$group <- case_when(
+  histology1hit_avg$Mouse %in% c("m1","m3","m7","m8") ~ "Veh",
+  histology1hit_avg$Mouse %in% c("m2","m4","m5","m6","m9") ~ "CAN6",
+  TRUE ~ NA_character_
+)
+histology1hit_avg <- histology1hit_avg %>% filter(!is.na(group))
+histology1hit_avg$group <- factor(histology1hit_avg$group, levels = c("Veh", "CAN6"))
+
+# --- Helper for histology panels ---
+histo_panel <- function(data, yvar, ylab, title) {
+  ggplot(data, aes(x = group, y = .data[[yvar]], color = group)) +
+    geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+    geom_jitter(width = 0.15, size = 1.2, alpha = 0.6) +
+    stat_compare_means(comparisons = list(c("Veh", "CAN6")), size = 3,
+                       label = "p.format", bracket.size = 0.4) +
+    scale_color_manual(values = fig2_colors) +
+    labs(x = NULL, y = ylab, title = title) +
+    theme_pubr(base_size = 10) +
+    theme(legend.position = "none",
+          axis.title.y = element_text(size = 9, angle = 90),
+          axis.text.x = element_text(size = 9),
+          axis.text.y = element_text(size = 8),
+          plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+          plot.margin = margin(4, 4, 4, 4))
+}
+
+histA <- histo_panel(histology1hit_avg, "NeutrophilsAlveolarSpace",
+  ylab = "Score", title = "Alveolar Neutrophils")
+histB <- histo_panel(histology1hit_avg, "NeutrophilsInterstitialSpace",
+  ylab = "Score", title = "Interstitial Neutrophils")
+histC <- histo_panel(histology1hit_avg, "HyalineMembranes",
+  ylab = "Score", title = "Hyaline Membranes")
+histD <- histo_panel(histology1hit_avg, "ProteinaceousDebrisAirspaces",
+  ylab = "Score", title = "Proteinaceous Debris")
+histE <- histo_panel(histology1hit_avg, "AlveolarSeptalThickening",
+  ylab = "Score", title = "Alveolar Septal Thickening")
+
+figS_histology <- histA + histB + histC + histD + histE +
+  plot_layout(nrow = 1) +
+  plot_annotation(tag_levels = "A",
+    theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+
+ggsave("FigS_Histology_Features.pdf", figS_histology, width = 14, height = 4)
+```
+
+---
+
+## Figure 3: Neutrophil Depletion
+
+```{r figure3}
+# =============================================================================
+# Figure 3: Neutrophil depletion — PMN_DTR vs PMN_WT
+# Experiments 8, 20, 23
+# =============================================================================
+
+fig3_data <- facts %>%
+  filter(experiment %in% c(8, 20, 23)) %>%
+  mutate(genotype = factor(genotype, levels = c("PMNWT", "PMNDTR")))
+
+# Remove mice that did not receive inoculum or died after anesthesia
+fig3_data <- fig3_data %>%
+  filter(!(mouseID == "WTCAN6_m5" & experiment == 20),
+         !(mouseID == "WTCAN6_m1" & experiment == 20),
+         !(mouseID == "PMNDTR_m15" & experiment == 23),
+         !(mouseID == "PMNDTR_m11" & experiment == 23))
+
+# --- Shared aesthetics ---
+fig3_colors <- c("PMNWT" = "royalblue", "PMNDTR" = "maroon")
+fig3_comparisons <- list(c("PMNWT", "PMNDTR"))
+
+theme_fig3 <- function() {
+  theme_pubr(base_size = 10) %+replace%
+    theme(legend.position = "none",
+          axis.title.y = element_text(size = 9, angle = 90),
+          axis.text.x = element_text(size = 9),
+          axis.text.y = element_text(size = 8),
+          plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+          plot.margin = margin(4, 4, 4, 4))
+}
+
+fig3_boxplot <- function(data, yvar, ylab, title = NULL,
+                         ylimits = NULL, ybreaks = waiver()) {
+  p <- ggplot(data, aes(x = genotype, y = .data[[yvar]], color = genotype)) +
+    geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+    geom_beeswarm(size = 1.2, cex = 2) +
+    stat_compare_means(comparisons = fig3_comparisons, size = 3,
+                       label = "p.format", bracket.size = 0.4) +
+    scale_color_manual(values = fig3_colors) +
+    labs(x = NULL, y = ylab, title = title) +
+    theme_fig3()
+  if (!is.null(ylimits)) p <- p + scale_y_continuous(limits = ylimits, breaks = ybreaks)
+  p
+}
+
+# --- Panel C: Weight trajectory ---
+fig3_wt_long <- fig3_data %>%
+  dplyr::select(mouseID, genotype, d0weightpercent, d1weightpercent, d2weightpercent) %>%
+  pivot_longer(cols = d0weightpercent:d2weightpercent,
+               names_to = "Day", values_to = "WeightPct") %>%
+  mutate(Day = factor(Day,
+    levels = c("d0weightpercent", "d1weightpercent", "d2weightpercent"),
+    labels = c("Day 0", "Day 1", "Day 2")))
+
+fig3_wt_summary <- fig3_wt_long %>%
+  group_by(genotype, Day) %>%
+  summarise(median = median(WeightPct, na.rm = TRUE),
+            q25 = quantile(WeightPct, 0.25, na.rm = TRUE),
+            q75 = quantile(WeightPct, 0.75, na.rm = TRUE), .groups = "drop")
+
+fig3C <- ggplot(fig3_wt_summary,
+                aes(x = Day, y = median, group = genotype, color = genotype)) +
+  geom_line(linewidth = 0.8) + geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.15, linewidth = 0.5) +
+  scale_color_manual(values = fig3_colors) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "Body Weight (% baseline)", color = NULL) +
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "top", legend.key.size = unit(0.4, "cm"),
+        plot.margin = margin(4, 4, 4, 4),
+        panel.grid.major = element_line(color = "grey90", linewidth = 0.3))
+
+# --- Endpoint data: remove deaths and survival-only experiment ---
+fig3_endpoints <- fig3_data %>%
+  filter(!(mouseID == "DTRCAN6_m2" & experiment == 20),
+         !(mouseID %in% c("DTRCAN6_m7", "DTRCAN6_m8") & experiment == 8),
+         !(mouseID %in% c("PMNDTR_m6", "PMNDTR_m10", "PMNDTR_m13", "PMNDTR_m18") & experiment == 23),
+         experiment != 23)
+fig3_endpoints$BAL_IgM <- as.numeric(fig3_endpoints$BAL_IgM)
+fig3_endpoints <- fig3_endpoints %>%
+  mutate(log10_lungCFU = log10(LeftLung_CanCFUs + 1),
+         log10_kidneyCFU = log10(Rkidney_CanCFUs + 1))
+
+# --- Panels D–J ---
+fig3D <- fig3_boxplot(fig3_endpoints, "log10_lungCFU",
+  ylab = expression(log[10] ~ "Lung" ~ italic("C. albicans") ~ "CFUs/g"),
+  title = "Lung CFUs", ylimits = c(0, 7.5))
+fig3E <- fig3_boxplot(fig3_endpoints, "log10_kidneyCFU",
+  ylab = expression(log[10] ~ "Kidney" ~ italic("C. albicans") ~ "CFUs/g"),
+  title = "Kidney CFUs", ylimits = c(0, 5))
+fig3F <- fig3_boxplot(fig3_endpoints, "BALcellcount",
+  ylab = expression("BAL Cells (" * 10^4 * ")"), title = "BAL Cell Count")
+fig3G <- fig3_boxplot(fig3_endpoints, "BAL_Neutrophils_total",
+  ylab = expression("BAL PMNs (" * 10^4 * ")"), title = "BAL Neutrophils")
+fig3H <- fig3_boxplot(fig3_endpoints, "LungWeightNormalized",
+  ylab = "Lung Weight / BW (mg/g)", title = "Normalized Lung Weight", ylimits = c(0, 10))
+fig3I <- fig3_boxplot(fig3_endpoints, "BAL_totalProtein",
+  ylab = "BAL Protein (mg/ml)", title = "BAL Protein")
+fig3J <- fig3_boxplot(fig3_endpoints, "BAL_RAGE",
+  ylab = "BAL sRAGE (pg/ml)", title = "BAL sRAGE")
+
+# --- Placeholders ---
+fig3A <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "(schematic)", size = 5, color = "grey60")
+fig3B <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "(survival curve)", size = 5, color = "grey60")
+
+# --- Assembly ---
+fig3_row1 <- fig3A + fig3B + plot_layout(widths = c(1.2, 1))
+fig3_row2 <- fig3C + fig3D + fig3E + fig3F + plot_layout(nrow = 1)
+fig3_row3 <- fig3G + fig3H + fig3I + fig3J + plot_layout(nrow = 1)
+
+fig3 <- fig3_row1 / fig3_row2 / fig3_row3 +
+  plot_layout(heights = c(1, 1.2, 1.2)) +
+  plot_annotation(tag_levels = "A",
+    theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+
+ggsave("Figure3_R.pdf", fig3, width = 10, height = 8.5)
+```
+
+---
+
+## Figure 4: Live vs Heat-Killed *C. albicans*
+
+```{r figure4}
+# =============================================================================
+# Figure 4: Live vs Heat-Killed — SC5314 + Clinical Isolate
+# Row 1 (A–D): SC5314 (Experiments 30, 37, 38)
+# Row 2 (E–H): Clinical Isolate (Experiment 40)
+# =============================================================================
+
+# --- SC5314 data ---
+fig4_sc <- facts %>%
+  filter(experiment %in% c(30, 37, 38), genotype == "WT") %>%
+  mutate(group = case_when(
+    group == "CAN6" ~ "Live CA",
+    group %in% c("HKCAN6", "HKCAN") ~ "HKCA",
+    TRUE ~ group)) %>%
+  mutate(group = factor(group, levels = c("Live CA", "HKCA")))
+fig4_sc$BAL_IgM <- as.numeric(fig4_sc$BAL_IgM)
+
+# --- Clinical isolate data ---
+fig4_clin <- facts %>%
+  filter(experiment == 40, genotype == "WT") %>%
+  mutate(group = case_when(
+    group == "ClinCan6" ~ "Live CA",
+    group == "HKClinCan6" ~ "HKCA",
+    TRUE ~ group)) %>%
+  mutate(group = factor(group, levels = c("Live CA", "HKCA")))
+fig4_clin$BAL_IgM <- as.numeric(fig4_clin$BAL_IgM)
+
+# --- Shared aesthetics ---
+sc_colors   <- c("Live CA" = "darkorange2",  "HKCA" = "mediumpurple4")
+clin_colors <- c("Live CA" = "firebrick",    "HKCA" = "steelblue3")
+fig4_comparisons <- list(c("Live CA", "HKCA"))
+
+theme_fig4 <- function() {
+  theme_pubr(base_size = 10) %+replace%
+    theme(legend.position = "none",
+          axis.title.y = element_text(size = 9, angle = 90),
+          axis.text.x = element_text(size = 9),
+          axis.text.y = element_text(size = 8),
+          plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+          plot.margin = margin(4, 4, 4, 4))
+}
+
+fig4_boxplot <- function(data, yvar, ylab, title = NULL, colors,
+                         ylimits = NULL, ybreaks = waiver()) {
+  p <- ggplot(data, aes(x = group, y = .data[[yvar]], color = group)) +
+    geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+    geom_beeswarm(size = 1.2, cex = 2) +
+    stat_compare_means(comparisons = fig4_comparisons, size = 3,
+                       label = "p.format", bracket.size = 0.4) +
+    scale_color_manual(values = colors) +
+    labs(x = NULL, y = ylab, title = title) +
+    theme_fig4()
+  if (!is.null(ylimits)) p <- p + scale_y_continuous(limits = ylimits, breaks = ybreaks)
+  p
+}
+
+# --- Row 1: SC5314 ---
+sc_A <- fig4_boxplot(fig4_sc, "BAL_Neutrophils_total",
+  ylab = expression("BAL PMNs (" * 10^4 * ")"), title = "BAL Neutrophils", colors = sc_colors)
+sc_B <- fig4_boxplot(fig4_sc, "LungWeightNormalized",
+  ylab = "Lung Weight / BW (mg/g)", title = "Normalized Lung Weight", colors = sc_colors)
+sc_C <- fig4_boxplot(fig4_sc, "BAL_totalProtein",
+  ylab = "BAL Protein (mg/ml)", title = "BAL Protein", colors = sc_colors)
+sc_D <- fig4_boxplot(fig4_sc, "BAL_IgM",
+  ylab = "BAL IgM (ng/ml)", title = "BAL IgM", colors = sc_colors)
+
+# --- Row 2: Clinical Isolate ---
+clin_E <- fig4_boxplot(fig4_clin, "BAL_Neutrophils_total",
+  ylab = expression("BAL PMNs (" * 10^4 * ")"), title = "BAL Neutrophils", colors = clin_colors)
+clin_F <- fig4_boxplot(fig4_clin, "LungWeightNormalized",
+  ylab = "Lung Weight / BW (mg/g)", title = "Normalized Lung Weight", colors = clin_colors)
+clin_G <- fig4_boxplot(fig4_clin, "BAL_totalProtein",
+  ylab = "BAL Protein (mg/ml)", title = "BAL Protein", colors = clin_colors)
+clin_H <- fig4_boxplot(fig4_clin, "BAL_IgM",
+  ylab = "BAL IgM (ng/ml)", title = "BAL IgM", colors = clin_colors)
+
+# --- Title rows ---
+title_sc <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "C. albicans SC5314",
+           size = 4.5, fontface = "bold.italic")
+title_clin <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "Clinical Isolate C. albicans",
+           size = 4.5, fontface = "bold.italic")
+
+# --- Assembly ---
+row1 <- sc_A + sc_B + sc_C + sc_D + plot_layout(nrow = 1)
+row2 <- clin_E + clin_F + clin_G + clin_H + plot_layout(nrow = 1)
+
+fig4_combined <- wrap_elements(title_sc) / row1 / wrap_elements(title_clin) / row2 +
+  plot_layout(heights = c(0.08, 1, 0.08, 1)) +
+  plot_annotation(tag_levels = list(c("", "A","B","C","D", "", "E","F","G","H")),
+    theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+
+ggsave("Figure4_LiveVsHKCA.pdf", fig4_combined, width = 12, height = 7)
+```
+
+---
+
+## Figure 5: Yeast-Lock + Human In Vitro
+
+```{r figure5}
+# =============================================================================
+# Figure 5: Hyphal transition drives lung injury — Mouse + Human Data
+# Row 1 (A–E): Mouse in vivo yeast-lock (Exps 13, 15)
+# Row 2 (F–H): Human in vitro (LDH cytotoxicity, primary TEER, ALI TEER)
+# =============================================================================
+
+# --- Row 1: Mouse in vivo ---
+fig5_data <- facts %>%
+  filter(experiment %in% c(13, 15), genotype == "WT") %>%
+  mutate(group = recode(group, "TT21" = "Wild-type", "TNRG1" = "Yeast-lock")) %>%
+  mutate(group = factor(group, levels = c("Wild-type", "Yeast-lock")))
+
+fig5_data <- fig5_data %>%
+  filter(!(mouseID == "tt21_m3" & experiment == 13)) %>%
+  filter(!(mouseID == "tt21_m2" & experiment == 15))
+fig5_data$BAL_IgM <- as.numeric(fig5_data$BAL_IgM)
+fig5_data <- fig5_data %>% mutate(log10_lungCFU = log10(LeftLung_CanCFUs + 1))
+
+fig5_colors <- c("Wild-type" = "forestgreen", "Yeast-lock" = "goldenrod3")
+fig5_comparisons <- list(c("Wild-type", "Yeast-lock"))
+
+theme_fig5 <- function() {
+  theme_pubr(base_size = 10) %+replace%
+    theme(legend.position = "none",
+          axis.title.y = element_text(size = 9, angle = 90),
+          axis.text.x = element_text(size = 9),
+          axis.text.y = element_text(size = 8),
+          plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+          plot.margin = margin(4, 4, 4, 4))
+}
+
+fig5_boxplot <- function(data, yvar, ylab, title = NULL,
+                         ylimits = NULL, ybreaks = waiver()) {
+  p <- ggplot(data, aes(x = group, y = .data[[yvar]], color = group)) +
+    geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+    geom_beeswarm(size = 1.2, cex = 2) +
+    stat_compare_means(comparisons = fig5_comparisons, size = 3,
+                       label = "p.format", bracket.size = 0.4) +
+    scale_color_manual(values = fig5_colors) +
+    labs(x = NULL, y = ylab, title = title) +
+    theme_fig5()
+  if (!is.null(ylimits)) p <- p + scale_y_continuous(limits = ylimits, breaks = ybreaks)
+  p
+}
+
+fig5A <- fig5_boxplot(fig5_data, "log10_lungCFU",
+  ylab = expression(log[10] ~ "Lung" ~ italic("C. albicans") ~ "CFUs/g"),
+  title = "Lung CFUs", ylimits = c(0, 5))
+fig5B <- fig5_boxplot(fig5_data, "BAL_Neutrophils_total",
+  ylab = expression("BAL PMNs (" * 10^4 * ")"), title = "BAL Neutrophils")
+fig5C <- fig5_boxplot(fig5_data, "NeutElastase",
+  ylab = "BAL NE (pg/ml)", title = "Neutrophil Elastase")
+fig5D <- fig5_boxplot(fig5_data, "BAL_totalProtein",
+  ylab = "BAL Protein (mg/ml)", title = "BAL Protein")
+fig5E <- fig5_boxplot(fig5_data, "BAL_IgM",
+  ylab = "BAL IgM (ng/ml)", title = "BAL IgM")
+
+# --- Row 2: Human in vitro data ---
+human_raw <- read_excel("humanInvitroData.xlsx", col_names = FALSE)
+
+# Panel F: Human LDH Cytotoxicity by MOI
+ldh_lysis <- as.numeric(human_raw[2, 2:17])
+ldh_bg    <- as.numeric(human_raw[3, 2:17])
+ldh_moi1  <- as.numeric(human_raw[4, 2:17])
+ldh_moi5  <- as.numeric(human_raw[5, 2:17])
+ldh_moi10 <- as.numeric(human_raw[6, 2:17])
+
+ldh_df <- data.frame(
+  value = c(ldh_lysis, ldh_bg, ldh_moi1, ldh_moi5, ldh_moi10),
+  group = rep(c("Lysis_Control", "Background_Control", "MOI_1", "MOI_5", "MOI_10"), each = 16)
+)
+ldh_df$group <- factor(ldh_df$group,
+  levels = c("Lysis_Control", "Background_Control", "MOI_1", "MOI_5", "MOI_10"))
+
+fig5F <- ggplot(ldh_df, aes(x = group, y = value, color = group)) +
+  geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+  geom_beeswarm(size = 1.0, cex = 1.5) +
+  stat_compare_means(comparisons = list(c("Lysis_Control", "MOI_1"),
+                                        c("Lysis_Control", "MOI_5"),
+                                        c("Lysis_Control", "MOI_10")),
+                     size = 2.5, label = "p.signif", bracket.size = 0.3) +
+  scale_color_manual(values = c("Lysis_Control" = "black", "Background_Control" = "orange",
+                                "MOI_1" = "steelblue3", "MOI_5" = "mediumpurple",
+                                "MOI_10" = "firebrick")) +
+  scale_x_discrete(labels = c("Lysis", "Bkgd", "MOI 1", "MOI 5", "MOI 10")) +
+  labs(x = NULL, y = "Relative Cytotoxicity", title = "Human Epithelial Cytotoxicity") +
+  theme_fig5() + theme(axis.text.x = element_text(size = 7, angle = 30, hjust = 1))
+
+# Panel G: Primary Human Bronchial TEER
+teer1_veh <- as.numeric(human_raw[9, 2:13])
+teer1_wt  <- as.numeric(human_raw[10, 2:13])
+teer1_df <- data.frame(value = c(teer1_veh, teer1_wt),
+                       group = rep(c("Vehicle", "Wild-type"), each = 12))
+teer1_df$group <- factor(teer1_df$group, levels = c("Vehicle", "Wild-type"))
+
+fig5G <- ggplot(teer1_df, aes(x = group, y = value, color = group)) +
+  geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+  geom_beeswarm(size = 1.2, cex = 2) +
+  stat_compare_means(comparisons = list(c("Vehicle", "Wild-type")), size = 3,
+                     label = "p.format", bracket.size = 0.4) +
+  scale_color_manual(values = c("Vehicle" = "gray40", "Wild-type" = "forestgreen")) +
+  labs(x = NULL, y = "Normalized TEER\n(relative to baseline)", title = "Primary Bronchial TEER") +
+  theme_fig5()
+
+# Panel H: Human Alveolar TEER (Vehicle vs WT vs Yeast-lock)
+teer2_veh <- as.numeric(human_raw[13, 2:13])
+teer2_wt  <- as.numeric(human_raw[14, 2:13])
+teer2_yl  <- as.numeric(human_raw[15, 2:13])
+teer2_df <- data.frame(value = c(teer2_veh, teer2_wt, teer2_yl),
+                       group = rep(c("Vehicle", "Wild-type", "Yeast-lock"), each = 12))
+teer2_df$group <- factor(teer2_df$group, levels = c("Vehicle", "Wild-type", "Yeast-lock"))
+
+fig5H <- ggplot(teer2_df, aes(x = group, y = value, color = group)) +
+  geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+  geom_beeswarm(size = 1.2, cex = 2) +
+  stat_compare_means(comparisons = list(c("Vehicle", "Wild-type"), c("Vehicle", "Yeast-lock")),
+                     size = 3, label = "p.format", bracket.size = 0.4) +
+  scale_color_manual(values = c("Vehicle" = "gray40", "Wild-type" = "forestgreen",
+                                "Yeast-lock" = "goldenrod3")) +
+  labs(x = NULL, y = "Normalized TEER\n(relative to baseline)", title = "Yeast-Lock Alveolar TEER") +
+  theme_fig5()
+
+# --- Assembly ---
+row1 <- fig5A + fig5B + fig5C + fig5D + fig5E + plot_layout(nrow = 1)
+row2 <- fig5F + fig5G + fig5H + plot_layout(nrow = 1, widths = c(1.3, 1, 1))
+
+fig5 <- row1 / row2 +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(tag_levels = "A",
+    theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+
+ggsave("Figure5_combined.pdf", fig5, width = 14, height = 7)
+```
+
+---
+
+## Supplemental: Candidalysin (Exp 31, Day 1)
+
+```{r candidalysin_day1}
+# =============================================================================
+# Supplemental: Candidalysin mutant vs WT (BWP17 vs ece1)
+# Experiment 31, Day 1 sacrifice
+# =============================================================================
+
+factsCL <- facts %>%
+  filter(experiment == 31) %>%
+  mutate(group = if_else(group == "BWP17", "WT", group),
+         group = factor(group, levels = c("WT", "Ece1")))
+factsCL$BAL_IgM <- as.numeric(factsCL$BAL_IgM)
+
+cl_colors <- c("WT" = "gray28", "Ece1" = "#D62728")
+cl_comparisons <- list(c("WT", "Ece1"))
+
+# Weight trajectory
+factsCL_wt <- factsCL %>%
+  pivot_longer(cols = c(d0weightpercent, d1weightpercent),
+               names_to = "Day", values_to = "WeightPct") %>%
+  mutate(Day = factor(Day, levels = c("d0weightpercent", "d1weightpercent"),
+                      labels = c("Day 0", "Day 1")))
+
+cl_wt_sum <- factsCL_wt %>%
+  group_by(group, Day) %>%
+  summarise(median = median(WeightPct, na.rm = TRUE),
+            q25 = quantile(WeightPct, 0.25, na.rm = TRUE),
+            q75 = quantile(WeightPct, 0.75, na.rm = TRUE), .groups = "drop")
+
+cl_wtplot <- ggplot(cl_wt_sum, aes(x = Day, y = median, group = group, color = group)) +
+  geom_line(linewidth = 0.8) + geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.15, linewidth = 0.5) +
+  scale_color_manual(values = cl_colors) +
+  labs(x = NULL, y = "Body Weight (% baseline)", title = "Weight Change", color = NULL) +
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "top", legend.key.size = unit(0.4, "cm"),
+        plot.title = element_text(size = 10, face = "bold", hjust = 0.5))
+
+# Endpoint panels
+cl_boxplot <- function(data, yvar, ylab, title) {
+  ggplot(data, aes(x = group, y = .data[[yvar]], color = group)) +
+    geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+    geom_beeswarm(size = 1.2, cex = 2) +
+    stat_compare_means(comparisons = cl_comparisons, size = 3,
+                       label = "p.format", bracket.size = 0.4) +
+    scale_color_manual(values = cl_colors) +
+    labs(x = NULL, y = ylab, title = title) +
+    theme_pubr(base_size = 10) +
+    theme(legend.position = "none",
+          axis.title.y = element_text(size = 9, angle = 90),
+          plot.title = element_text(size = 10, face = "bold", hjust = 0.5))
+}
+
+cl_neutrophils <- cl_boxplot(factsCL, "BAL_Neutrophils_total",
+  ylab = expression("BAL PMNs (" * 10^4 * ")"), title = "BAL Neutrophils")
+cl_lungwt <- cl_boxplot(factsCL, "LungWeightNormalized",
+  ylab = "Lung Weight / BW (mg/g)", title = "Normalized Lung Weight")
+cl_prot <- cl_boxplot(factsCL, "BAL_totalProtein",
+  ylab = "BAL Protein (mg/ml)", title = "BAL Protein")
+cl_igm <- cl_boxplot(factsCL, "BAL_IgM",
+  ylab = "BAL IgM (ng/ml)", title = "BAL IgM")
+
+figS_candidalysin <- cl_wtplot + cl_neutrophils + cl_lungwt + cl_prot + cl_igm +
+  plot_layout(nrow = 1) +
+  plot_annotation(tag_levels = "A",
+    theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+
+ggsave("FigS_Candidalysin_Day1.pdf", figS_candidalysin, width = 14, height = 3.5)
+```
+
+---
+
+## Figure 6: Two-Hit Models (CAN+LPS and CAN+PA)
+
+```{r figure6}
+# =============================================================================
+# Figure 6: Two-Hit Models
+# CAN-LPS (Exps 3, 5, 6 — WT, Day 4)
+# CAN-PA (Exp 28 — Day 3)
+# =============================================================================
+
+# ---- CAN-LPS data ----
+fig6_lps <- facts %>%
+  filter(experiment %in% c(3, 5, 6), genotype == "WT",
+         group %in% c("CAN6Veh", "VehLPS", "CAN6LPS")) %>%
+  mutate(group = factor(group, levels = c("CAN6Veh", "VehLPS", "CAN6LPS")))
+fig6_lps$BAL_IgM <- as.numeric(fig6_lps$BAL_IgM)
+fig6_lps_bal <- fig6_lps %>% filter(mouseID != "WTCAN6LPS_m2")  # drowned mouse
+
+# ---- CAN-PA data ----
+fig6_pa <- facts %>%
+  filter(experiment == 28) %>%
+  filter(mouseID != "CA_PA_m4") %>%
+  mutate(group = factor(group, levels = c("Veh_Veh", "Veh_PA", "CA_PA")))
+fig6_pa$BAL_IgM <- as.numeric(fig6_pa$BAL_IgM)
+fig6_pa$BAL_totalProtein <- as.numeric(fig6_pa$BAL_totalProtein)
+
+# ---- Colors and comparisons ----
+lps_colors <- c("CAN6Veh" = "gray50", "VehLPS" = "steelblue3", "CAN6LPS" = "firebrick")
+pa_colors  <- c("Veh_Veh" = "gray50", "Veh_PA" = "steelblue",  "CA_PA"  = "firebrick3")
+lps_comparisons <- list(c("CAN6LPS", "CAN6Veh"), c("CAN6LPS", "VehLPS"))
+pa_comparisons  <- list(c("CA_PA", "Veh_Veh"), c("CA_PA", "Veh_PA"))
+
+theme_fig6 <- function() {
+  theme_pubr(base_size = 10) %+replace%
+    theme(legend.position = "none",
+          axis.title.y = element_text(size = 9, angle = 90),
+          axis.text.x = element_text(size = 8),
+          axis.text.y = element_text(size = 8),
+          plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+          plot.margin = margin(4, 4, 4, 4))
+}
+
+fig6_boxplot <- function(data, yvar, ylab, title = NULL, colors, comparisons,
+                         ylimits = NULL, ybreaks = waiver()) {
+  p <- ggplot(data, aes(x = group, y = .data[[yvar]], color = group)) +
+    geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+    geom_beeswarm(size = 1.2, cex = 2) +
+    stat_compare_means(comparisons = comparisons, size = 3,
+                       label = "p.format", bracket.size = 0.4) +
+    scale_color_manual(values = colors) +
+    labs(x = NULL, y = ylab, title = title) +
+    theme_fig6()
+  if (!is.null(ylimits)) p <- p + scale_y_continuous(limits = ylimits, breaks = ybreaks)
+  p
+}
+
+# ---- Weight trajectories ----
+fig6_lps_wt <- fig6_lps %>%
+  dplyr::select(mouseID, group, d0weightpercent:d4weightpercent) %>%
+  pivot_longer(cols = d0weightpercent:d4weightpercent,
+               names_to = "Day", values_to = "WeightPct") %>%
+  mutate(Day = factor(Day, levels = paste0("d", 0:4, "weightpercent"),
+                      labels = paste("Day", 0:4)))
+fig6_lps_wt_sum <- fig6_lps_wt %>%
+  group_by(group, Day) %>%
+  summarise(median = median(WeightPct, na.rm = TRUE),
+            q25 = quantile(WeightPct, 0.25, na.rm = TRUE),
+            q75 = quantile(WeightPct, 0.75, na.rm = TRUE), .groups = "drop")
+
+fig6_wtA <- ggplot(fig6_lps_wt_sum,
+    aes(x = Day, y = median, group = group, color = group)) +
+  geom_line(linewidth = 0.8) + geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.15, linewidth = 0.5) +
+  scale_color_manual(values = lps_colors) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "Body Weight (% baseline)", title = "Weight Change: CAN + LPS", color = NULL) +
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "top", legend.key.size = unit(0.4, "cm"),
+        plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+        panel.grid.major = element_line(color = "grey90", linewidth = 0.3))
+
+fig6_pa_wt <- fig6_pa %>%
+  dplyr::select(mouseID, group, d0weightpercent:d3weightpercent) %>%
+  pivot_longer(cols = d0weightpercent:d3weightpercent,
+               names_to = "Day", values_to = "WeightPct") %>%
+  mutate(Day = factor(Day, levels = paste0("d", 0:3, "weightpercent"),
+                      labels = paste("Day", 0:3)))
+fig6_pa_wt_sum <- fig6_pa_wt %>%
+  group_by(group, Day) %>%
+  summarise(median = median(WeightPct, na.rm = TRUE),
+            q25 = quantile(WeightPct, 0.25, na.rm = TRUE),
+            q75 = quantile(WeightPct, 0.75, na.rm = TRUE), .groups = "drop")
+
+fig6_wtB <- ggplot(fig6_pa_wt_sum,
+    aes(x = Day, y = median, group = group, color = group)) +
+  geom_line(linewidth = 0.8) + geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.15, linewidth = 0.5) +
+  scale_color_manual(values = pa_colors) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "Body Weight (% baseline)", title = "Weight Change: CAN + PA", color = NULL) +
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "top", legend.key.size = unit(0.4, "cm"),
+        plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+        panel.grid.major = element_line(color = "grey90", linewidth = 0.3))
+
+# ---- CAN-LPS endpoint panels ----
+lps_lungwt <- fig6_boxplot(fig6_lps, "LungWeightNormalized",
+  ylab = "Lung Weight / BW (mg/g)", title = "Normalized Lung Weight",
+  colors = lps_colors, comparisons = lps_comparisons, ylimits = c(0, 12.5))
+lps_cells <- fig6_boxplot(fig6_lps_bal, "BALcellcount",
+  ylab = expression("BAL Cells (" * 10^4 * ")"), title = "BAL Cells",
+  colors = lps_colors, comparisons = lps_comparisons)
+lps_pmn <- fig6_boxplot(fig6_lps_bal, "BAL_Neutrophils_total",
+  ylab = expression("BAL PMNs (" * 10^4 * ")"), title = "BAL Neutrophils",
+  colors = lps_colors, comparisons = lps_comparisons)
+lps_prot <- fig6_boxplot(fig6_lps_bal, "BAL_totalProtein",
+  ylab = "BAL Protein (mg/ml)", title = "BAL Protein",
+  colors = lps_colors, comparisons = lps_comparisons)
+lps_igm <- fig6_boxplot(fig6_lps_bal, "BAL_IgM",
+  ylab = "BAL IgM (ng/ml)", title = "BAL IgM",
+  colors = lps_colors, comparisons = lps_comparisons)
+
+# ---- CAN-PA endpoint panels ----
+pa_lungwt <- fig6_boxplot(fig6_pa, "LungWeightNormalized",
+  ylab = "Lung Weight / BW (mg/g)", title = "Normalized Lung Weight",
+  colors = pa_colors, comparisons = pa_comparisons, ylimits = c(0, 12))
+pa_cells <- fig6_boxplot(fig6_pa, "BALcellcount",
+  ylab = expression("BAL Cells (" * 10^4 * ")"), title = "BAL Cells",
+  colors = pa_colors, comparisons = pa_comparisons)
+pa_pmn <- fig6_boxplot(fig6_pa, "BAL_Neutrophils_total",
+  ylab = expression("BAL PMNs (" * 10^4 * ")"), title = "BAL Neutrophils",
+  colors = pa_colors, comparisons = pa_comparisons)
+pa_prot <- fig6_boxplot(fig6_pa, "BAL_totalProtein",
+  ylab = "BAL Protein (mg/ml)", title = "BAL Protein",
+  colors = pa_colors, comparisons = pa_comparisons)
+pa_igm <- fig6_boxplot(fig6_pa, "BAL_IgM",
+  ylab = "BAL IgM (ng/ml)", title = "BAL IgM",
+  colors = pa_colors, comparisons = pa_comparisons)
+
+# ---- Placeholders and titles ----
+fig6_schematic <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "(schematic)", size = 5, color = "grey60")
+title_lps <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "C. albicans + LPS",
+           size = 4.5, fontface = "bold.italic")
+title_pa <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "C. albicans + P. aeruginosa",
+           size = 4.5, fontface = "bold.italic")
+
+# ---- Assembly ----
+row1 <- fig6_schematic + fig6_wtA + fig6_wtB + plot_layout(nrow = 1, widths = c(2, 1, 1))
+row2 <- lps_lungwt + lps_cells + lps_pmn + lps_prot + lps_igm + plot_layout(nrow = 1)
+row3 <- pa_lungwt + pa_cells + pa_pmn + pa_prot + pa_igm + plot_layout(nrow = 1)
+
+fig6 <- row1 / wrap_elements(title_lps) / row2 / wrap_elements(title_pa) / row3 +
+  plot_layout(heights = c(1.2, 0.08, 1, 0.08, 1)) +
+  plot_annotation(tag_levels = list(
+    c("A", "B", "C", "", "D", "E", "F", "G", "H", "", "I", "J", "K", "L", "M")),
+    theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+
+ggsave("Figure6_TwoHit.pdf", fig6, width = 16, height = 12)
+```
+
+## Supplemental: Two-Hit CFUs and Histology
+
+```{r supp_twohit_cfus_histology}
+# =============================================================================
+# Supplemental: CFU figures for both models + CAN-LPS histology
+# =============================================================================
+
+# CAN-LPS Candida CFUs
+fig6_lps_bal <- fig6_lps_bal %>% mutate(log10_lungCFU = log10(LeftLung_CanCFUs + 1))
+figS_lps_cfu <- fig6_boxplot(fig6_lps_bal, "log10_lungCFU",
+  ylab = expression(log[10] ~ "Lung" ~ italic("C. albicans") ~ "CFUs/g"),
+  title = "CAN+LPS: Lung Candida CFUs",
+  colors = lps_colors, comparisons = lps_comparisons)
+
+# CAN-PA CFUs
+fig6_pa <- fig6_pa %>%
+  mutate(log10_lungCFU = log10(LeftLung_CanCFUs + 1),
+         log10_psaCFU  = log10(Lung_PSA_CFU + 1))
+figS_pa_canCfu <- fig6_boxplot(fig6_pa, "log10_lungCFU",
+  ylab = expression(log[10] ~ "Lung" ~ italic("C. albicans") ~ "CFUs/g"),
+  title = "CAN+PA: Lung Candida CFUs",
+  colors = pa_colors, comparisons = pa_comparisons)
+figS_pa_psaCfu <- fig6_boxplot(fig6_pa, "log10_psaCFU",
+  ylab = expression(log[10] ~ "Lung" ~ italic("P. aeruginosa") ~ "CFUs/g"),
+  title = "CAN+PA: Lung Pseudomonas CFUs",
+  colors = pa_colors, comparisons = pa_comparisons)
+
+figS_cfus <- figS_lps_cfu + figS_pa_canCfu + figS_pa_psaCfu +
+  plot_layout(nrow = 1) +
+  plot_annotation(tag_levels = "A",
+    theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+ggsave("FigS_TwoHit_CFUs.pdf", figS_cfus, width = 10, height = 4)
+
+# CAN-LPS Histology
+histology2hit <- histology2hit %>%
+  filter(Reviewer == "Lokesh",
+         group %in% c("CAN6Veh", "VehLPS", "CAN6LPS")) %>%
+  mutate(group = factor(group, levels = c("CAN6Veh", "VehLPS", "CAN6LPS")))
+
+figS_histo_2hit <- ggplot(histology2hit,
+    aes(x = group, y = ScorePerField, color = group)) +
+  geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+  geom_jitter(width = 0.15, size = 1.2, alpha = 0.6) +
+  stat_compare_means(comparisons = lps_comparisons, size = 3,
+                     label = "p.format", bracket.size = 0.4) +
+  scale_color_manual(values = lps_colors) +
+  labs(x = NULL, y = "Histology Score", title = "CAN+LPS Histology Score") +
+  theme_fig6()
+
+figS_histo_images <- ggplot() + theme_void() +
+  annotate("text", x = 0.5, y = 0.5, label = "(histology images)", size = 5, color = "grey60")
+
+figS_histo <- figS_histo_2hit + figS_histo_images +
+  plot_layout(widths = c(0.6, 1)) +
+  plot_annotation(tag_levels = "A",
+    theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+ggsave("FigS_TwoHit_Histology.pdf", figS_histo, width = 8, height = 4)
+```
+
+---
+
+## Supplemental: Yeast-Lock + *P. aeruginosa* (Exp 39)
+
+```{r supp_yeastlock_pa}
+# =============================================================================
+# Supplemental: Yeast-Lock vs WT C. albicans + P. aeruginosa (Exp 39)
+# =============================================================================
+
+fig_ylpa <- facts %>%
+  filter(experiment == 39, genotype == "WT") %>%
+  mutate(group = case_when(
+    group == "TT21_PA"  ~ "Wild-type + PA",
+    group == "TNRG1_PA" ~ "Yeast-lock + PA",
+    TRUE ~ group)) %>%
+  mutate(group = factor(group, levels = c("Wild-type + PA", "Yeast-lock + PA")))
+fig_ylpa$BAL_IgM <- as.numeric(fig_ylpa$BAL_IgM)
+fig_ylpa <- fig_ylpa %>%
+  mutate(log10_lungCFU = log10(LeftLung_CanCFUs + 1),
+         log10_psaCFU  = log10(Lung_PSA_CFU + 1))
+
+ylpa_colors <- c("Wild-type + PA" = "forestgreen", "Yeast-lock + PA" = "goldenrod3")
+ylpa_comparisons <- list(c("Wild-type + PA", "Yeast-lock + PA"))
+
+theme_ylpa <- function() {
+  theme_pubr(base_size = 10) %+replace%
+    theme(legend.position = "none",
+          axis.title.y = element_text(size = 9, angle = 90),
+          axis.text.x = element_text(size = 8),
+          axis.text.y = element_text(size = 8),
+          plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+          plot.margin = margin(4, 4, 4, 4))
+}
+
+ylpa_boxplot <- function(data, yvar, ylab, title = NULL,
+                         ylimits = NULL, ybreaks = waiver()) {
+  p <- ggplot(data, aes(x = group, y = .data[[yvar]], color = group)) +
+    geom_boxplot(width = 0.4, outlier.shape = NA, linewidth = 0.5) +
+    geom_beeswarm(size = 1.2, cex = 2) +
+    stat_compare_means(comparisons = ylpa_comparisons, size = 3,
+                       label = "p.format", bracket.size = 0.4) +
+    scale_color_manual(values = ylpa_colors) +
+    labs(x = NULL, y = ylab, title = title) +
+    theme_ylpa()
+  if (!is.null(ylimits)) p <- p + scale_y_continuous(limits = ylimits, breaks = ybreaks)
+  p
+}
+
+# Weight trajectory
+ylpa_wt_long <- fig_ylpa %>%
+  dplyr::select(mouseID, group, d0weightpercent:d3weightpercent) %>%
+  pivot_longer(cols = d0weightpercent:d3weightpercent,
+               names_to = "Day", values_to = "WeightPct") %>%
+  mutate(Day = factor(Day, levels = paste0("d", 0:3, "weightpercent"),
+                      labels = paste("Day", 0:3)))
+ylpa_wt_sum <- ylpa_wt_long %>%
+  group_by(group, Day) %>%
+  summarise(median = median(WeightPct, na.rm = TRUE),
+            q25 = quantile(WeightPct, 0.25, na.rm = TRUE),
+            q75 = quantile(WeightPct, 0.75, na.rm = TRUE), .groups = "drop")
+
+ylpa_A <- ggplot(ylpa_wt_sum,
+    aes(x = Day, y = median, group = group, color = group)) +
+  geom_line(linewidth = 0.8) + geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.15, linewidth = 0.5) +
+  scale_color_manual(values = ylpa_colors) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "Body Weight (% baseline)", title = "Weight Change", color = NULL) +
+  theme_pubr(base_size = 10) +
+  theme(legend.position = "top", legend.key.size = unit(0.4, "cm"),
+        plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+        panel.grid.major = element_line(color = "grey90", linewidth = 0.3))
+
+ylpa_B <- ylpa_boxplot(fig_ylpa, "LungWeightNormalized",
+  ylab = "Lung Weight / BW (mg/g)", title = "Normalized Lung Weight")
+ylpa_C <- ylpa_boxplot(fig_ylpa, "BALcellcount",
+  ylab = expression("BAL Cells (" * 10^4 * ")"), title = "BAL Cells")
+ylpa_D <- ylpa_boxplot(fig_ylpa, "BAL_Neutrophils_total",
+  ylab = expression("BAL PMNs (" * 10^4 * ")"), title = "BAL Neutrophils")
+ylpa_E <- ylpa_boxplot(fig_ylpa, "log10_lungCFU",
+  ylab = expression(log[10] ~ italic("C. albicans") ~ "CFUs/g"), title = "Lung Candida CFUs")
+ylpa_F <- ylpa_boxplot(fig_ylpa, "log10_psaCFU",
+  ylab = expression(log[10] ~ italic("P. aeruginosa") ~ "CFUs/g"), title = "Lung Pseudomonas CFUs")
+ylpa_G <- ylpa_boxplot(fig_ylpa, "BAL_totalProtein",
+  ylab = "BAL Protein (mg/ml)", title = "BAL Protein")
+ylpa_H <- ylpa_boxplot(fig_ylpa, "BAL_IgM",
+  ylab = "BAL IgM (ng/ml)", title = "BAL IgM")
+
+row1 <- ylpa_A + ylpa_B + ylpa_C + ylpa_D + plot_layout(nrow = 1)
+row2 <- ylpa_E + ylpa_F + ylpa_G + ylpa_H + plot_layout(nrow = 1)
+
+figS_ylpa <- row1 / row2 +
+  plot_annotation(
+    title = expression(bold("Yeast-Lock vs Wild-Type" ~ italic("C. albicans") ~ "+ " ~ italic("P. aeruginosa"))),
+    tag_levels = "A",
+    theme = theme(plot.title = element_text(size = 12, hjust = 0.5),
+                  plot.tag = element_text(size = 14, face = "bold")))
+
+ggsave("FigS_YeastLock_PA.pdf", figS_ylpa, width = 14, height = 7)
+```

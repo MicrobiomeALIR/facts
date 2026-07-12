@@ -1,0 +1,3945 @@
+---
+title: "Candida in Lower Respiratory Tract: Clinical Outcomes Analysis"
+subtitle: "FACTS-ALIR Cohort - Publication-Ready Analysis"
+author: "Georgios Kitsios, MD PhD"
+date: "`r Sys.Date(7.12.26)`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: hide
+    theme: cosmo
+---
+
+# Candida in Lower Respiratory Tract: Clinical Outcomes Analysis
+
+**Publication-Ready Analysis Script**
+
+---
+
+## Setup
+
+This R Markdown document performs comprehensive analysis of lower respiratory tract culture patterns and clinical outcomes in mechanically ventilated patients with acute respiratory failure.
+
+**Dataset:** `factsalir_12.23.25.csv` (n=896 baseline observations)  
+**Analysis Population:** Culture-positive patients (n=474 after filtering)  
+**Analysis Date:** June 2026
+
+---
+
+```{r setup, include=FALSE}
+################################################################################
+# SECTION 0: ENVIRONMENT SETUP
+################################################################################
+
+# Set code chunk defaults
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6,
+  dpi = 300
+)
+
+# Clear workspace
+rm(list = ls())
+gc()
+
+# Set working directory
+# IMPORTANT: Change this to your working directory path
+working_dir <- "analysis_humans_6.2026"
+
+# Check if directory exists, create if not
+if (!dir.exists(working_dir)) {
+  dir.create(working_dir, recursive = TRUE)
+  cat("Created working directory:", working_dir, "\n")
+}
+
+# Set as working directory
+setwd(working_dir)
+
+cat("Working directory set to:", getwd(), "\n\n")
+
+# Create subdirectories for organized outputs
+output_dir <- "outputs"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+if (!dir.exists(file.path(output_dir, "tables"))) {
+  dir.create(file.path(output_dir, "tables"))
+}
+
+if (!dir.exists(file.path(output_dir, "figures"))) {
+  dir.create(file.path(output_dir, "figures"))
+}
+
+cat("Output directories created\n")
+cat("Working structure:\n")
+cat("  ", working_dir, "/\n")
+cat("    ├── outputs/\n")
+cat("    │   ├── tables/\n")
+cat("    │   └── figures/\n")
+cat("    └── factsalir_12.23.25.csv\n\n")
+```
+
+---
+
+```{r load_packages}
+################################################################################
+# Load Required Packages
+################################################################################
+
+# Install packages if needed (uncomment to run)
+# install.packages(c("tidyverse", "survival", "survminer", "tableone", "ggpubr", "scales"))
+
+library(tidyverse)      # Data manipulation (dplyr, ggplot2, etc.)
+library(survival)       # Survival analysis functions
+library(survminer)      # Visualization of survival curves
+library(tableone)       # Table 1 generation (standardized approach)
+library(ggpubr)         # Enhanced ggplot2 for statistical comparisons
+library(scales)         # Formatting utilities
+library(readxl)
+cat("✓ All packages loaded successfully\n")
+```
+
+
+
+# SECTION 1: Data Loading & Initial Quality Checks
+
+```{r load_data}
+################################################################################
+# Load cleaned dataset and perform basic validation
+################################################################################
+
+cat("\n")
+cat("================================================================================\n")
+cat("INITIAL DATA CHARACTERISTICS\n")
+cat("================================================================================\n\n")
+
+# Load main dataset
+# Make sure factsalir_12.23.25.csv is in your working directory
+factsalir <- read_csv("factsalir_12.23.25.csv")
+
+# Report initial dimensions
+cat(sprintf("Full factsalir dataset: %d rows × %d columns\n", 
+            nrow(factsalir), ncol(factsalir)))
+
+# Report Colonization_Groups distribution (includes missing)
+cat("\nColonization_Groups distribution (full dataset):\n")
+print(table(factsalir$Colonization_Groups, useNA = "ifany"))
+```
+
+
+
+# SECTION 2: Data Preparation - Filter for Culture-Positive Cases
+
+```{r filter_data}
+################################################################################
+# Filter for culture-positive cases
+# Include only patients with documented lower respiratory tract growth
+################################################################################
+
+cat("\n")
+cat("================================================================================\n")
+cat("DATA FILTERING FOR CULTURE-POSITIVE CASES\n")
+cat("================================================================================\n\n")
+
+# Step 1: Filter for culture-positive cases
+factsalir_cxpos <- factsalir %>%
+  filter(!Colonization_Groups %in% c(NA, "NoGrowth"))
+
+cat(sprintf("After excluding NA and NoGrowth: n=%d patients\n", nrow(factsalir_cxpos)))
+
+# Step 2: Check for duplicate SubjectIDs
+n_unique_before <- n_distinct(factsalir_cxpos$SubjectID)
+n_rows_before <- nrow(factsalir_cxpos)
+
+factsalir_cxpos <- factsalir_cxpos %>%
+  filter(!duplicated(SubjectID))
+
+n_unique_after <- n_distinct(factsalir_cxpos$SubjectID)
+n_rows_after <- nrow(factsalir_cxpos)
+
+cat(sprintf("Duplicate SubjectID check: %d rows → %d rows (removed %d duplicates)\n",
+            n_rows_before, n_rows_after, n_rows_before - n_rows_after))
+
+# Final analysis population
+cat(sprintf("\n*** FINAL ANALYSIS POPULATION: n=%d ***\n\n", n_unique_after))
+```
+
+# SECTION 3: Variable Creation - Culture Result Stratification
+
+```{r create_variables}
+################################################################################
+# Create standardized culture result variable for stratification
+################################################################################
+
+cat("Culture result categorization:\n")
+print(table(factsalir_cxpos$Colonization_Groups))
+
+# Create cxres_lrt variable (culture result - lower respiratory tract)
+factsalir_cxpos <- factsalir_cxpos %>%
+  mutate(
+    # Character version for programming
+    cxres_lrt = case_when(
+      Colonization_Groups == "Bacterial_Only" ~ "BacterialPathogen",
+      Colonization_Groups == "NRF_Only" ~ "NRF",
+      Colonization_Groups == "Yeast_Present" ~ "Candida",
+      TRUE ~ NA_character_
+    ),
+    # Factor version for statistical tests (reference = BacterialPathogen)
+    cxres_lrt_f = factor(cxres_lrt,
+                        levels = c("BacterialPathogen", "NRF", "Candida"))
+  )
+
+# Validate recoding
+cat("\nRecoding validation:\n")
+print(table(Original = factsalir_cxpos$Colonization_Groups,
+           Recoded = factsalir_cxpos$cxres_lrt,
+           useNA = "ifany"))
+```
+
+
+
+# SECTION 4: Outcome Variable Creation - Liberation Success
+
+```{r create_liberation}
+################################################################################
+# Define "liberation success" as successful extubation among 90-day survivors
+################################################################################
+
+cat("\n")
+cat("================================================================================\n")
+cat("OUTCOME VARIABLE CREATION: LIBERATION SUCCESS\n")
+cat("================================================================================\n\n")
+
+# Examine underlying variables
+cat("Intubation status (raw):\n")
+print(table(factsalir_cxpos$intubation_status, useNA = "ifany"))
+
+cat("\n90-Day mortality (raw):\n")
+print(table(factsalir_cxpos$Mortality90DayClean, useNA = "ifany"))
+
+cat("\nCrosstabulation - intubation status × mortality:\n")
+print(table(Intubation = factsalir_cxpos$intubation_status,
+           Mortality = factsalir_cxpos$Mortality90DayClean,
+           useNA = "ifany"))
+
+# Create liberation_success variable
+factsalir_cxpos <- factsalir_cxpos %>%
+  mutate(
+    liberation_success = case_when(
+      Mortality90DayClean == 1 ~ 0,           # Death = failure to liberate
+      intubation_status == 1 ~ 1,             # Extubated = success
+      intubation_status == 0 ~ 0,             # Still intubated = failure
+      TRUE ~ NA_real_
+    ),
+    # Factor version for interpretation
+    liberation_success_f = factor(liberation_success,
+                                 levels = c(0, 1),
+                                 labels = c("Failed", "Successfully Liberated"))
+  )
+
+# Validate recoding
+cat("\n--- Recoding Validation ---\n")
+print(table(Mortality = factsalir_cxpos$Mortality90DayClean,
+           Intubation = factsalir_cxpos$intubation_status,
+           Liberation = factsalir_cxpos$liberation_success_f,
+           useNA = "ifany"))
+
+# Report outcome frequencies
+cat("\nLiberation success distribution:\n")
+liberation_summary <- factsalir_cxpos %>%
+  group_by(cxres_lrt_f) %>%
+  summarise(
+    n = n(),
+    n_liberated = sum(liberation_success == 1, na.rm = TRUE),
+    pct_liberated = 100 * mean(liberation_success == 1, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(liberation_summary)
+```
+
+---
+
+# SECTION 5: Data Quality Assurance
+
+```{r data_qa}
+################################################################################
+# Check completeness of key outcome variables
+################################################################################
+
+cat("\n")
+cat("================================================================================\n")
+cat("OUTCOME VARIABLE COMPLETENESS (n=", nrow(factsalir_cxpos), ")\n")
+cat("================================================================================\n\n")
+
+completeness_check <- tibble(
+  Variable = c("VFD", "timetoliberation", "liberation_success",
+               "Mortality90DayClean", "RALE_mean", "spd_plasma",
+               "il8", "rage", "st2", "tnfr1_final"),
+  Available = c(
+    sum(!is.na(factsalir_cxpos$VFD)),
+    sum(!is.na(factsalir_cxpos$timetoliberation)),
+    sum(!is.na(factsalir_cxpos$liberation_success)),
+    sum(!is.na(factsalir_cxpos$Mortality90DayClean)),
+    sum(!is.na(factsalir_cxpos$RALE_mean)),
+    sum(!is.na(factsalir_cxpos$spd_plasma)),
+    sum(!is.na(factsalir_cxpos$il8)),
+    sum(!is.na(factsalir_cxpos$rage)),
+    sum(!is.na(factsalir_cxpos$st2)),
+    sum(!is.na(factsalir_cxpos$tnfr1_final))
+  )
+) %>%
+  mutate(
+    Pct_Available = sprintf("%.1f%%", 100 * Available / nrow(factsalir_cxpos)),
+    Available = sprintf("%d/%d", Available, nrow(factsalir_cxpos))
+  )
+
+print(completeness_check)
+```
+
+---
+
+# SECTION 6: PRIMARY ANALYSIS - Liberation from Mechanical Ventilation
+
+```{r primary_analysis}
+################################################################################
+# Primary endpoint: Time to liberation from mechanical ventilation
+# Accounts for death as competing event (treated as failure to liberate)
+################################################################################
+
+cat("\n")
+cat("================================================================================\n")
+cat("PRIMARY ANALYSIS: LIBERATION FROM MECHANICAL VENTILATION\n")
+cat("================================================================================\n\n")
+
+# Prepare data for survival analysis
+liberation_data <- factsalir_cxpos %>%
+  filter(!is.na(timetoliberation), !is.na(liberation_success), !is.na(cxres_lrt_f))
+
+cat(sprintf("Sample size for liberation analysis: n=%d\n", nrow(liberation_data)))
+cat("\nSample size by culture result:\n")
+print(table(liberation_data$cxres_lrt_f))
+
+# Fit Kaplan-Meier survival curves
+liberation_fit <- survfit(Surv(timetoliberation, liberation_success) ~ cxres_lrt_f,
+                          data = liberation_data)
+
+# Print survival statistics
+cat("\n--- Survival Statistics ---\n")
+print(liberation_fit)
+
+# Perform log-rank test
+logrank_test <- survdiff(Surv(timetoliberation, liberation_success) ~ cxres_lrt_f,
+                         data = liberation_data)
+
+cat("\nLog-rank test:\n")
+cat(sprintf("Test statistic: %.2f\n", logrank_test$chisq))
+cat(sprintf("P-value: %.4f\n", 1 - pchisq(logrank_test$chisq, 1)))
+```
+
+
+```{r plot_liberation, fig.width=12, fig.height=8}
+# Create survival curve
+library(gridExtra)
+library(ggpubr)
+
+# Create survival plot - using YOUR proven approach
+liberation_fit_plot <- ggsurvplot(
+  liberation_fit,
+  pval = TRUE,
+  pval.coord = c(40, 0.3),
+  fun = "event",
+  censor.shape = "|",
+  censor = TRUE,
+  title = "Liberation from Mechanical Ventilation by Lower Respiratory Culture Result",
+  legend.labs = c("Bacterial pathogen", "NRF only", "Candida present"),
+  palette = c("#00A087", "#3C5488", "#E64B35"),
+  risk.table = TRUE,
+  tables.theme = clean_theme(),
+  legend.title = "Culture Result",
+  font.legend = c(11, "bold", "black"),
+  font.title = c(13, "bold", "black"),
+  xlab = "Days from ICU admission", 
+  xlim = c(0, 90),  # ← LIMIT X-AXIS TO 90 DAYS
+  break.time.by = 15,  # ← NICE SPACING
+  size = 1.2)
+
+
+# Display
+print(liberation_fit_plot)
+
+# Combine plot + table
+gridExtra::grid.arrange(
+  grobs = list(liberation_fit_plot$plot, liberation_fit_plot$table),
+  heights = c(3, 1)
+)
+
+# Save exactly like your proven code
+pdf(file.path(output_dir, "figures", "Figure_01_Liberation_by_CultureResult.pdf"),
+    width = 11, height = 6)
+print(liberation_fit_plot, newpage = FALSE)
+dev.off()
+
+cat("\n✓ Figure saved\n")
+
+```
+
+
+# SECTION 7: SECONDARY ANALYSIS - Candida Prevalence Clinical Subtype
+
+```{r secondary_analysis}
+
+cat("\n")
+cat("================================================================================\n")
+cat("CANDIDA PREVALENCE ACROSS ALL subtypes\n")
+cat("================================================================================\n\n")
+
+# Calculate Candida prevalence by disease group
+candida_prev_all <- factsalir_cxpos %>%
+  group_by(group) %>%
+  summarise(
+    Total = n(),
+    Candida_n = sum(cxres_lrt == "Candida"),
+    Candida_pct = 100 * Candida_n / Total,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Candida_pct))
+
+cat("Candida colonization prevalence by disease subtype:\n\n")
+print(candida_prev_all)
+
+# Overall Candida prevalence
+overall_candida <- sum(candida_prev_all$Candida_n) / sum(candida_prev_all$Total)
+cat(sprintf("\nOverall Candida prevalence: %.1f%% (%d/%d patients)\n",
+           100 * overall_candida, 
+           sum(candida_prev_all$Candida_n),
+           sum(candida_prev_all$Total)))
+
+# Chi-square test
+cat("\n--- Chi-square Test: Disease Group × Candida Presence ---\n")
+chisq_table <- table(factsalir_cxpos$group, factsalir_cxpos$cxres_lrt == "Candida")
+chisq_result <- chisq.test(chisq_table)
+cat(sprintf("Chi-square statistic: %.2f\n", chisq_result$statistic))
+cat(sprintf("P-value: %.4f\n", chisq_result$p.value))
+
+# Save
+write.csv(candida_prev_all,
+         file.path(output_dir, "Candida_Prevalence_All_Groups.csv"),
+         row.names = FALSE)
+
+cat("\n✓ Results saved\n")
+
+```
+
+
+```{r plot_candida_prevalence_all, fig.width=12, fig.height=6}
+
+library(ggpubr)
+
+# Sort by prevalence (highest to lowest)
+candida_prev_sorted <- candida_prev_all %>%
+  arrange(desc(Candida_pct)) %>%
+  mutate(group = factor(group, levels = group))
+
+# Create bar plot
+fig_candida_prevalence <- candida_prev_sorted %>%
+  ggplot(aes(x = reorder(group, -Candida_pct), y = Candida_pct, fill = group)) +
+  geom_col(alpha = 0.8, color = "black", width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f%%\n(n=%d/%d)", 
+                               Candida_pct, Candida_n, Total)),
+            vjust = -0.5, size = 3.5, fontface = "bold") +
+  scale_y_continuous(limits = c(0, max(candida_prev_sorted$Candida_pct) * 1.15),
+                     breaks = seq(0, 50, by = 10)) +
+  scale_fill_viridis_d(name = "Clinical Subtype", option = "turbo") +
+  labs(
+    title = sprintf("Candida Prevalence by Clinical Subtype \n(Overall: %.1f%%, x² p=%.4f)", 
+                   100 * overall_candida, chisq_result$p.value),
+    x = "Clinical Subtype",
+    y = "Candida Prevalence (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+print(fig_candida_prevalence)
+
+# Save
+pdf(file.path(output_dir, "figures", "Figure_02_Candida_Prevalence_All_Groups.pdf"),
+    width = 12, height = 6)
+print(fig_candida_prevalence)
+dev.off()
+
+cat("\n✓ Figure saved: Figure_02_Candida_Prevalence_All_Groups.pdf\n")
+
+```
+
+```{r plot_culture_distribution_all, fig.width=14, fig.height=7}
+
+# Create culture result distribution across all groups
+fig_culture_dist_all <- factsalir_cxpos %>%
+  filter(!is.na(cxres_lrt_f), !is.na(group)) %>%
+  ggplot(aes(x = reorder(group, -table(group)[group]), fill = cxres_lrt_f)) +
+  geom_bar(position = "fill", alpha = 0.85, color = "black", width = 0.7) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(
+    name = "Culture Result",
+    values = c("BacterialPathogen" = "#00A087",
+               "NRF" = "#3C5488",
+               "Candida" = "#E64B35"),
+    labels = c("BacterialPathogen" = "Bacterial pathogen",
+               "NRF" = "NRF only",
+               "Candida" = "Candida present")
+  ) +
+  labs(
+    title = "Lower Respiratory Tract Culture Results by Clinical Subtype",
+    x = "Clinical Subtype",
+    y = "Proportion"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right",
+    legend.title = element_text(face = "bold")
+  )
+
+print(fig_culture_dist_all)
+
+# Save
+pdf(file.path(output_dir, "figures", "Figure_03_Culture_Distribution_All_Groups.pdf"),
+    width = 14, height = 7)
+print(fig_culture_dist_all)
+dev.off()
+
+cat("\n✓ Figure saved: Figure_03_Culture_Distribution_All_Groups.pdf\n")
+
+```
+
+---
+
+# SECTION 8: TABLE 1 - Baseline Characteristics
+
+```{r define_variables}
+################################################################################
+# Define core variables for Table 1
+################################################################################
+
+vars_categorical_core <- c(
+  "Gender", "Race",
+  "HistDiabetes", "HistCOPD", "HistCCF", "HistCRF",
+  "IsActiveNeoplasm", "HistImmunosuppression", "HistCLD", "HistPulmonaryFibrosis",
+  "group", "nonpulmsepsis", "Pneumonia", "Aspiration",
+  "phenotype", "SepsisType", "lunginjury",
+  "day1OnABX", "steroids", "VasopressorFirstWeek",
+  "Mortality30DayClean", "Mortality90DayClean"
+)
+
+vars_continuous_core <- c(
+  "Age", "BMI",
+  "WBC", "HGB", "Platelets", "Creatinine", "BUN", "CO2",
+  "lips_score", "RALE_mean",
+  "il8", "tnfr1_final", "st2", "rage", "procalcitonin",
+  "il8_eta_pradj", "tnfr1_eta_pradj", "st2_eta_pradj", "rage_eta_pradj",
+  "VFD", "drivingpressure_imput", "ventilatory_ratio_imput",
+  "WorstPaO2FiO2Ratio_sampledate_imput"
+)
+
+cat("Checking variable availability...\n")
+missing_cat <- vars_categorical_core[!vars_categorical_core %in% names(factsalir_cxpos)]
+missing_con <- vars_continuous_core[!vars_continuous_core %in% names(factsalir_cxpos)]
+
+if (length(missing_cat) > 0) {
+  cat("Missing categorical variables:", paste(missing_cat, collapse = ", "), "\n")
+}
+if (length(missing_con) > 0) {
+  cat("Missing continuous variables:", paste(missing_con, collapse = ", "), "\n")
+}
+
+if (length(missing_cat) == 0 & length(missing_con) == 0) {
+  cat("✓ All variables available\n")
+}
+```
+
+
+```{r generate_tables}
+
+table_cat <- CreateCatTable(
+  vars = vars_categorical_core,
+  strata = "cxres_lrt_f",
+  data = factsalir_cxpos,
+  test = TRUE,
+  testExact = fisher.test,
+  includeNA = FALSE,
+  addOverall = TRUE
+)
+
+table_con <- CreateContTable(
+  vars = vars_continuous_core,
+  strata = "cxres_lrt_f",
+  data = factsalir_cxpos,
+  addOverall = TRUE
+)
+
+cat("✓ Tables generated\n")
+
+```
+
+```{r print_tables}
+
+cat("\nTABLE 1: CATEGORICAL VARIABLES\n")
+print(table_cat, digits = 2, pDigits = 3, printToggle = FALSE)
+
+cat("\nTABLE 1: CONTINUOUS VARIABLES\n")
+print(table_con, digits = 1, pDigits = 3, printToggle = FALSE,
+      nonnormal = vars_continuous_core)
+
+```
+
+```{r export_tables}
+
+cat_output <- print(table_cat, digits = 2, pDigits = 3, printToggle = FALSE)
+write.csv(cat_output, 
+         file.path(output_dir, "Table1_Categorical_Characteristics.csv"))
+
+con_output <- print(table_con, digits = 1, pDigits = 3, printToggle = FALSE,
+                    nonnormal = vars_continuous_core)
+write.csv(con_output,
+         file.path(output_dir,  "Table1_Continuous_Characteristics.csv"))
+
+cat("✓ Tables exported\n")
+
+```
+
+---
+
+################################################################################
+# OUTCOME FIGURES BY CULTURE RESULT - PAIRWISE COMPARISONS
+# PNAS/Nature Publication Style - Compact, Tight Figures
+# 
+# Shows pairwise comparisons (Candida vs BacterialPathogen, Candida vs NRF)
+# with bracket lines and p-values
+################################################################################
+
+```{r setup_outcome_figures_pairwise}
+
+library(ggbeeswarm)  # For beeswarm points
+library(ggpubr)      # For statistical annotations
+
+# Define color palette (consistent across all figures)
+culture_colors <- c(
+  "BacterialPathogen" = "#00A087",
+  "NRF" = "#3C5488",
+  "Candida" = "#E64B35"
+)
+
+culture_labels <- c(
+  "BacterialPathogen" = "Bacterial pathogen",
+  "NRF" = "NRF only",
+  "Candida" = "Candida present"
+)
+
+# Define pairwise comparisons (Candida vs others)
+pairwise_comparisons <- list(
+  c("Candida", "BacterialPathogen"),
+  c("Candida", "NRF")
+)
+
+# Theme for compact figures (PNAS/Nature style)
+theme_compact <- function() {
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(size = 9),
+    legend.position = "none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+    plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "mm")
+  )
+}
+
+cat("✓ Theme, colors, and pairwise comparisons defined\n")
+
+```
+
+---
+
+## Figure 1: Ventilator-Free Days (VFD)
+
+```{r fig_vfd_by_culture_pairwise}
+
+fig_vfd <- factsalir_cxpos %>%
+  filter(!is.na(VFD), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = VFD, fill = cxres_lrt_f)) +
+  # Boxplot - narrow width
+  geom_boxplot(
+    width = 0.4,
+    alpha = 0.7,
+    outlier.shape = NA,
+    color = "black",
+    size = 0.5
+  ) +
+  # Individual points with beeswarm
+  geom_beeswarm(
+    aes(color = cxres_lrt_f),
+    alpha = 0.4,
+    size = 2,
+    cex = 2,
+    corral = "wrap"
+  ) +
+  # Pairwise comparisons with bracket lines
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  # Colors
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  # Labels and formatting
+  labs(
+    title = "Ventilator-Free Days by culture",
+    x = "",
+    y = "Ventilator-Free Days"
+  ) +
+  # Compact theme
+  theme_compact()
+
+print(fig_vfd)
+
+# Save individual figure
+pdf(file.path(output_dir, "figures", "Outcome_01_VFD_by_Culture.pdf"),
+     width = 3, height = 4.5)
+print(fig_vfd)
+dev.off()
+
+cat("✓ Figure saved: Outcome_01_VFD_by_Culture.pdf\n")
+
+```
+
+---
+
+## Figure 2: Driving Pressure
+
+```{r fig_driving_pressure_by_culture_pairwise}
+
+fig_dp <- factsalir_cxpos %>%
+  filter(!is.na(drivingpressure_imput), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = drivingpressure_imput, fill = cxres_lrt_f)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, 
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2, 
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  
+  labs(
+    title = "Driving Pressure by culture",
+    x = "",
+    y = "Driving Pressure (cmH₂O)"
+  ) +
+  theme_compact()
+
+print(fig_dp)
+
+pdf(file.path(output_dir, "figures", "Outcome_02_DrivingPressure_by_Culture.pdf"),
+    width = 3, height = 4.5)
+print(fig_dp)
+dev.off()
+
+cat("✓ Figure saved: Outcome_02_DrivingPressure_by_Culture.pdf\n")
+
+```
+
+---
+
+## Figure 3: IL-8 (Plasma)
+
+```{r fig_il8_by_culture_pairwise}
+
+fig_il8 <- factsalir_cxpos %>%
+  filter(!is.na(il8), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = il8, fill = cxres_lrt_f)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  
+  labs(
+    title = "IL-8 (Plasma) by Culture Result",
+    x = "Lower Respiratory Culture Result",
+    y = "IL-8 (pg/mL, log)"
+  ) +
+  theme_compact()
+
+print(fig_il8)
+
+pdf(file.path(output_dir, "figures", "Outcome_03_IL8_by_Culture.pdf"),
+    width = 4, height = 4.5)
+print(fig_il8)
+dev.off()
+
+cat("✓ Figure saved: Outcome_03_IL8_by_Culture.pdf\n")
+
+```
+
+
+```{r fig_st2_by_culture_pairwise}
+
+fig_st2 <- factsalir_cxpos %>%
+  filter(!is.na(st2), !is.na(cxres_lrt_f)) %>% filter(group!="Other") %>% 
+  ggplot(aes(x = cxres_lrt_f, y = st2, fill = cxres_lrt_f)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  
+  labs(
+    title = "Plasma sST2 by culture",
+    x = "",
+    y = "plasma sST2 (pg/mL, log)"
+  ) +
+  theme_compact()
+
+print(fig_st2)
+
+pdf(file.path(output_dir, "figures", "plasmaSt2_by_Culture.pdf"),
+    width = 4, height = 4.5)
+print(fig_st2)
+dev.off()
+
+
+```
+
+
+
+## Figure SP-D (Plasma)
+
+```{r fig_spd_by_culture_pairwise}
+
+fig_spd <- factsalir_cxpos %>%
+  filter(!is.na(spd_plasma), !is.na(cxres_lrt_f)) %>% filter(group!="Other") %>% 
+  ggplot(aes(x = cxres_lrt_f, y = spd_plasma, fill = cxres_lrt_f)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  
+  labs(
+    title = "Plasma SPD by culture",
+    x = "",
+    y = "plasma SPD (ng/mL, log)"
+  ) +
+  theme_compact()
+
+print(fig_spd)
+
+pdf(file.path(output_dir, "figures", "Outcome_06_SPD_by_Culture.pdf"),
+     width = 3, height = 4.5)
+print(fig_spd)
+dev.off()
+
+cat("✓ Figure saved: Outcome_06_SPD_by_Culture.pdf\n")
+
+```
+
+
+
+```{r fig_il6_tnfr1_pentraxin3_by_culture}
+
+# IL-6
+fig_il6 <- factsalir_cxpos %>%
+  filter(!is.na(il6), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = il6, fill = cxres_lrt_f)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  stat_compare_means(
+    comparisons = pairwise_comparisons, method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  labs(title = "IL-6 (Plasma) by Culture Result", x = "",
+       y = "IL-6 (pg/mL, log)") +
+  theme_compact()
+
+print(fig_il6)
+pdf(file.path(output_dir, "figures", "Outcome_IL6_by_Culture.pdf"), width = 4, height = 4.5)
+print(fig_il6)
+dev.off()
+
+# TNFR1
+fig_tnfr1 <- factsalir_cxpos %>%
+  filter(!is.na(tnfr1_final), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = tnfr1_final, fill = cxres_lrt_f)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  stat_compare_means(
+    comparisons = pairwise_comparisons, method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  labs(title = "TNFR1 (Plasma) by Culture Result", x = "",
+       y = "TNFR1 (pg/mL, log)") +
+  theme_compact()
+
+print(fig_tnfr1)
+pdf(file.path(output_dir, "figures", "Outcome_TNFR1_by_Culture.pdf"), width = 4, height = 4.5)
+print(fig_tnfr1)
+dev.off()
+
+# Pentraxin-3
+fig_ptx3 <- factsalir_cxpos %>%
+  filter(!is.na(pentraxin3), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = pentraxin3, fill = cxres_lrt_f)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  stat_compare_means(
+    comparisons = pairwise_comparisons, method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  labs(title = "Pentraxin-3 (ETA) by Culture Result", x = "",
+       y = "Pentraxin-3 (pg/mL, log)") +
+  theme_compact()
+
+print(fig_ptx3)
+pdf(file.path(output_dir, "figures", "Outcome_Pentraxin3_by_Culture.pdf"), width = 4, height = 4.5)
+print(fig_ptx3)
+dev.off()
+
+cat("✓ Figures saved: IL-6, TNFR1, Pentraxin-3 by Culture\n")
+
+```
+
+
+```{r import CRP}
+
+ALIR_EDTAPlasma_ELISA_Combined <- read_xlsx("ALIR_EDTAPlasma_ELISA_Combined.xlsx")
+names(ALIR_EDTAPlasma_ELISA_Combined)
+names(factsalir_cxpos)
+factsalir_cxpos$SubjectID
+
+factsalir_cxpos_crp <- merge(factsalir_cxpos,ALIR_EDTAPlasma_ELISA_Combined, by = "SubjectIDDay", all.x = TRUE )
+factsalir_cxpos_crp$CRP <- factsalir_cxpos_crp$CRP_ugml
+
+
+fig_crp<- factsalir_cxpos_crp %>%
+  filter(!is.na(CRP), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = CRP, fill = cxres_lrt_f)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  stat_compare_means(
+    comparisons = pairwise_comparisons, method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  labs(title = "plasma CRP by culture", x = "",
+       y = "CRP (mcg/mL, log)") +
+  theme_compact()
+
+print(fig_crp)
+pdf(file.path(output_dir, "figures", "Outcome_fig_crp_by_Culture.pdf"), width = 4, height = 4.5)
+print(fig_crp)
+dev.off()
+
+
+```
+
+
+## Figure 8: sRAGE (ETA, protein-adjusted)
+
+```{r fig_rage_eta_by_culture_pairwise}
+
+fig_rage_eta <- factsalir_cxpos %>%
+  filter(!is.na(rage_eta_pradj), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = rage_eta_pradj, fill = cxres_lrt_f)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  
+  labs(
+    title = "LRT sRAGE by culture",
+    x = "",
+    y = "sRAGE/Total Proten (pg/mL/mg), log)"
+  ) +
+  theme_compact()
+
+print(fig_rage_eta)
+
+pdf(file.path(output_dir, "figures", "Outcome_08_sRAGE_ETA_by_Culture.pdf"),
+     width = 3, height = 4.5)
+print(fig_rage_eta)
+dev.off()
+
+cat("✓ Figure saved: Outcome_08_sRAGE_ETA_by_Culture.pdf\n")
+
+```
+
+## Figure 9: sST2 (ETA, protein-adjusted)
+
+```{r fig_st2_eta_by_culture_pairwise}
+
+fig_st2_eta <- factsalir_cxpos %>%
+  filter(!is.na(st2_eta_pradj), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = st2_eta_pradj, fill = cxres_lrt_f)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  
+  labs(
+    title = "sST2 (ETA, Protein-adjusted)",
+    x = "Lower Respiratory Culture Result",
+    y = "sST2 (pg/mL, log)"
+  ) +
+  theme_compact()
+
+print(fig_st2_eta)
+
+pdf(file.path(output_dir, "figures", "Outcome_09_sST2_ETA_by_Culture.pdf"),
+    width = 4, height = 4.5)
+print(fig_st2_eta)
+dev.off()
+
+cat("✓ Figure saved: Outcome_09_sST2_ETA_by_Culture.pdf\n")
+
+```
+
+```{r fig_gdf15_eta_by_culture_pvalues}
+
+# Calculate GDF15/protein ratio
+factsalir_cxpos <- factsalir_cxpos %>%
+  mutate(
+    gdf15_eta_normalized = gdf15_eta_final / totProt_ETA
+  )
+
+# Create figure with consistent formatting
+fig_gdf15_eta <- factsalir_cxpos %>%
+  filter(!is.na(gdf15_eta_normalized), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = gdf15_eta_normalized, fill = cxres_lrt_f)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  # Pairwise comparisons with NUMERIC P-VALUES
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format",
+    p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors) +
+  scale_color_manual(values = culture_colors) +
+  scale_y_log10() +
+  
+  labs(
+    title = "LRT GDF15 by culture",
+    x = "",
+    y = "GDF15/Total Protein (pg/mL/mg)"
+  ) +
+  theme_compact()
+
+print(fig_gdf15_eta)
+
+pdf(file.path(output_dir, "figures", "Outcome_10_GDF15_ETA_by_Culture.pdf"),
+     width = 3, height = 4.5)
+print(fig_gdf15_eta)
+dev.off()
+
+cat("\n✓ Figure saved: Outcome_10_GDF15_ETA_by_Culture.pdf\n")
+
+```
+
+
+```{r fig_rale_by_culture_pvalues}
+
+# Create RALE scores figure
+fig_rale <- factsalir_cxpos %>%
+  filter(!is.na(RALE_mean), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = RALE_mean, fill = cxres_lrt_f)) +
+  
+  # Boxplot - narrow width
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  
+  # Individual points with beeswarm
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  # Pairwise comparisons with numeric p-values
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format",
+    p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3,
+    bracket.size = 0.4
+  ) +
+  
+  # Colors - consistent with other figures
+  scale_fill_manual(values = culture_colors) +
+  scale_color_manual(values = culture_colors) +
+  
+  # Labels and formatting
+  labs(
+    title = "RALE Scores by culture",
+    x = "",
+    y = "Mean RALE Score"
+  ) +
+  
+  # Compact theme
+  theme_compact()
+
+print(fig_rale)
+
+# Save figure
+pdf(file.path(output_dir, "figures", "Outcome_11_RALE_by_Culture.pdf"),
+    width = 3, height = 4.5)
+print(fig_rale)
+dev.off()
+
+cat("\n✓ Figure saved: Outcome_11_RALE_by_Culture.pdf\n")
+
+```
+
+```{r fig_pao2fio2_by_culture}
+
+fig_pao2fio2 <- factsalir_cxpos %>%
+  filter(!is.na(WorstPaO2FiO2Ratio_sampledate_imput), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = WorstPaO2FiO2Ratio_sampledate_imput, fill = cxres_lrt_f)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, 
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.4, size = 2, 
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  
+  labs(
+    title = "PaO2/FiO2 Ratio by culture",
+    x = "",
+    y = "PaO2/FiO2 Ratio (lowest)"
+  ) +
+  theme_compact()
+
+print(fig_pao2fio2)
+
+ggsave(file.path(output_dir, "figures", "Outcome_PaO2FiO2_by_Culture.pdf"),
+       plot = fig_pao2fio2, width = 5, height = 6, dpi = 300)
+
+cat("✓ Figure saved: Outcome_PaO2FiO2_by_Culture.pdf\n")
+
+
+
+```
+
+
+
+```{r multipanel_8outcomes}
+
+library(patchwork)
+
+# IMPORTANT: Make sure these individual figures are already created above:
+# fig_dp (Driving Pressure)
+# fig_rale (RALE)
+# fig_vfd (VFD)
+# fig_rage_eta (sRAGE ETA)
+# fig_gdf15_eta (GDF15 ETA)
+# fig_spd (SP-D Plasma)
+
+# Combine into 2×3 grid with panel labels
+multipanel_outcomes <- (
+  fig_dp +           # A) Driving Pressure
+    fig_pao2fio2 +
+  fig_rale +         # B) RALE
+  fig_vfd +          # C) VFD
+  fig_rage_eta +     # D) sRAGE (ETA)
+  fig_gdf15_eta +    # E) GDF15 (ETA)
+  fig_spd       +     # F) SP-D (Plasma)
+  fig_st2
+) + 
+plot_layout(nrow = 2, ncol = 4, heights = c(1, 1)) +
+plot_annotation(tag_levels = 'A', tag_suffix = ')',
+                theme = theme(plot.tag = element_text(size = 14, face = "bold")))
+
+# Display
+print(multipanel_outcomes)
+
+# Save as PDF (10×9 inches, publication quality)
+pdf(file.path(output_dir, "figures", "Multipanel_8_Outcomes_by_Culture.pdf"),
+    width = 13, height = 9)
+print(multipanel_outcomes)
+dev.off()
+
+```
+
+
+################################################################################
+# ITS FUNGAL ABUNDANCE PLOTS - PUBLICATION READY
+# 
+# Purpose: Create stacked bar plots showing relative and absolute abundance
+#          of lower respiratory tract fungal taxa
+#
+# Input: 
+#   - ITS_absolute_abundance.csv (from dataframe derivation)
+#   - ITS_relative_abundance.csv (from dataframe derivation)
+#
+# Output:
+#   - Figure_ITS_RelativeAbundance_3Categories.pdf (main manuscript)
+#   - Figure_ITS_AbsoluteAbundance_Top20.pdf (supplementary)
+#   - Figure_ITS_AbsoluteAbundance_with_Threshold.pdf (supplementary)
+#
+# NOTE: This code is posted publicly on GitHub
+################################################################################
+
+```{r ITS_plots_setup}
+
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║              ITS ABUNDANCE PLOTS - LOAD AND PREPARE DATA                  ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Load required packages
+library(tidyverse)
+library(scales)
+library(Polychrome)
+
+# Load exported dataframes from ITS derivation pipeline
+absolute_abundance <- read_csv("ITS_absolute_abundance.csv")
+relative_abundance <- read_csv("ITS_relative_abundance.csv")
+
+cat(sprintf("✓ Loaded absolute abundance: %d samples × %d variables\n", 
+            nrow(absolute_abundance), ncol(absolute_abundance)))
+cat(sprintf("✓ Loaded relative abundance: %d samples × %d variables\n",
+            nrow(relative_abundance), ncol(relative_abundance)))
+
+# Verify data integrity
+if (nrow(absolute_abundance) != nrow(relative_abundance)) {
+  stop("ERROR: Absolute and relative abundance have different numbers of samples!")
+}
+
+if (!all(absolute_abundance$SampleID == relative_abundance$SampleID)) {
+  stop("ERROR: Sample order differs between absolute and relative abundance!")
+}
+
+cat("\n✓ Data integrity check passed\n")
+
+```
+
+################################################################################
+# FIGURE 1: RELATIVE ABUNDANCE - 3 CATEGORIES (MAIN MANUSCRIPT)
+################################################################################
+```{r ITS_figure1_relative_3cat_CORRECT}
+
+relative_abundance <- read_csv("ITS_relative_abundance.csv")
+
+# Use INDIVIDUAL TAXA percentage columns (not the _reads_pct columns)
+# Calculate: Candida albicans, Other Candida, Other Taxa as percentages
+
+relative_abundance_3cat <- relative_abundance %>%
+  mutate(
+    # Sum all individual Candida species percentages
+    Candida_albicans_cat = Candida_albicans_pct,
+    
+    # Other Candida = sum of all other Candida species
+    Other_Candida_cat = Candida_dubliniensis_pct + 
+                        Candida_tropicalis_pct + 
+                        Candida_hyderabadensis_pct +
+                        Candida_orthopsilosis_pct +
+                        Candida_metapsilosis_pct +
+                        Meyerozyma_caribbica_pct +
+                        Candida_sojae_pct,
+    
+    # Other Taxa = everything else
+    Other_Taxa = 100 - Candida_albicans_cat - Other_Candida_cat
+  ) %>%
+  dplyr::select(SampleID, Total_Reads, 
+         Candida_albicans_cat, Other_Candida_cat, Other_Taxa,
+         Calbicans_present, Calbicans_burden)
+
+# Verify
+relative_abundance_3cat <- relative_abundance_3cat %>%
+  mutate(Check_Sum = Candida_albicans_cat + Other_Candida_cat + Other_Taxa)
+
+cat("Verification: All samples sum to 100%:", 
+    all(abs(relative_abundance_3cat$Check_Sum - 100) < 0.01), "\n\n")
+
+# Convert to long format
+relative_abundance_3cat_long <- relative_abundance_3cat %>%
+  dplyr::select(SampleID, Candida_albicans_cat, Other_Candida_cat, Other_Taxa) %>%
+  pivot_longer(
+    cols = c(Candida_albicans_cat, Other_Candida_cat, Other_Taxa),
+    names_to = "Category",
+    values_to = "Relative_Abundance"
+  ) %>%
+  mutate(
+    Category = case_when(
+      Category == "Candida_albicans_cat" ~ "C. albicans",
+      Category == "Other_Candida_cat" ~ "Other Candida spp.",
+      Category == "Other_Taxa" ~ "Other Taxa"
+    ),
+    Category = factor(Category, 
+                     levels = c("C. albicans", "Other Candida spp.", "Other Taxa"))
+  )
+
+# Order by C. albicans
+ordering <- relative_abundance_3cat %>%
+  arrange(desc(Candida_albicans_cat)) %>%
+  pull(SampleID)
+
+relative_abundance_3cat_long$SampleID <- factor(relative_abundance_3cat_long$SampleID, 
+                                                levels = ordering)
+
+# Create figure
+fig_relative_3cat <- ggplot(relative_abundance_3cat_long, 
+                            aes(x = SampleID, y = Relative_Abundance, fill = Category)) +
+  geom_bar(stat = "identity", width = 1) +
+  labs(x = "Individual Samples", y = "Relative Abundance (%)", fill = "") +
+  scale_y_continuous(labels = percent_format(scale = 1), limits = c(0, 100)) +
+  scale_fill_manual(values = c(
+    "C. albicans" = "brown3",
+    "Other Candida spp." = "pink2",
+    "Other Taxa" = "gray70"
+  )) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        plot.title = element_text(face = "bold", size = 14)) +
+  ggtitle("Candida Relative Abundance in ETA Specimens by ITS Sequencing")
+
+print(fig_relative_3cat)
+
+ggsave("Figure_ITS_RelativeAbundance_3Categories.pdf", fig_relative_3cat,
+       width = 14, height = 6.5, dpi = 300)
+
+```
+
+################################################################################
+# ITS RELATIVE ABUNDANCE - TOP 13 TAXA PLOT (SUPPLEMENTARY)
+# 
+# Purpose: Stacked bar plot showing top 13 taxa relative abundances
+# Includes all sample-dominant taxa (Meyerozyma, Aspergillus, Ganoderma, etc.)
+# Output: Figure_ITS_RelativeAbundance_Top13Taxa.pdf
+################################################################################
+
+```{r ITS_relative_top13_setup}
+
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║     ITS RELATIVE ABUNDANCE - TOP 13 TAXA (SUPPLEMENTARY FIGURE)           ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Load data
+#relative_abundance <- read_csv("ITS_relative_abundance.csv")
+
+cat(sprintf("Loaded: %d samples × %d columns\n\n", nrow(relative_abundance), ncol(relative_abundance)))
+
+```
+
+```{r ITS_relative_top13_identify_taxa}
+
+# Identify the individual taxa percentage columns
+individual_taxa_cols <- names(relative_abundance)[
+  !names(relative_abundance) %in% 
+  c("SampleID", "Total_Reads", "SubjectID",
+    "Candida_albicans_reads_pct", "Candida_albicans_complex_reads_pct",
+    "Candida_glabrata_reads_pct", "Any_Candida_reads_pct", 
+    "Other_Candida_reads_pct",
+    "Calbicans_present", "Any_Candida_present", "Calbicans_burden")
+]
+
+cat("Individual taxa columns identified:", length(individual_taxa_cols), "\n\n")
+
+```
+
+```{r ITS_relative_top13_rank_taxa}
+
+# Calculate total relative abundance for each taxon across all samples
+taxa_totals <- relative_abundance %>%
+  dplyr::select(all_of(individual_taxa_cols)) %>%
+  summarise(across(everything(), ~sum(., na.rm = TRUE))) %>%
+  pivot_longer(everything(), names_to = "Taxon", values_to = "Total_Abundance") %>%
+  arrange(desc(Total_Abundance)) %>%
+  mutate(
+    Rank = row_number(),
+    Cumulative_Abundance = cumsum(Total_Abundance),
+    Cumulative_Pct = round(100 * Cumulative_Abundance / sum(Total_Abundance), 1)
+  )
+
+cat("Top 15 taxa by total abundance:\n\n")
+print(head(taxa_totals, 15))
+
+cat(sprintf("\n\nTop 13 taxa account for %.1f%% of total abundance\n", 
+            taxa_totals$Cumulative_Pct[13]))
+
+```
+
+```{r ITS_relative_top13_select}
+
+# Select top 13 taxa (optimized to include all sample-dominant taxa)
+n_taxa_to_use <- 13
+
+selected_taxa <- taxa_totals$Taxon[1:n_taxa_to_use]
+
+cat("\n\n=== TOP 13 TAXA SELECTED ===\n\n")
+for (i in seq_along(selected_taxa)) {
+  abund <- taxa_totals$Total_Abundance[i]
+  pct <- taxa_totals$Cumulative_Pct[i]
+  cat(sprintf("%2d. %-35s (%.1f%% cumulative)\n", i, selected_taxa[i], pct))
+}
+
+```
+
+```{r ITS_relative_top13_prepare_data}
+
+# Create dataframe with top 13 taxa + Other category
+relative_abundance_top13 <- relative_abundance %>%
+  dplyr::select(SampleID, Total_Reads, all_of(selected_taxa)) %>%
+  mutate(
+    # Sum of top 13
+    Top13_Sum = rowSums(across(all_of(selected_taxa)), na.rm = TRUE),
+    # Other = remainder to 100%
+    Other = 100 - Top13_Sum
+  )
+
+cat("\n\nSample calculations (first 5):\n")
+print(relative_abundance_top13 %>% 
+  head(5) %>%
+dplyr::  select(SampleID, Top13_Sum, Other))
+
+# Verify sums to 100%
+relative_abundance_top13 <- relative_abundance_top13 %>%
+  mutate(Check_Sum = Top13_Sum + Other)
+
+cat("\n\nVerification - samples sum to 100%:", all(abs(relative_abundance_top13$Check_Sum - 100) < 0.01), "\n")
+cat("Range:", round(min(relative_abundance_top13$Check_Sum), 2), "-", 
+    round(max(relative_abundance_top13$Check_Sum), 2), "\n\n")
+
+```
+
+```{r ITS_relative_top13_long_format}
+
+# Convert to long format for plotting
+relative_abundance_top13_long <- relative_abundance_top13 %>%
+  dplyr::select(SampleID, all_of(selected_taxa), Other) %>%
+  pivot_longer(
+    cols = c(all_of(selected_taxa), Other),
+    names_to = "Taxon",
+    values_to = "Relative_Abundance"
+  )
+
+cat(sprintf("Long format prepared: %d rows (201 samples × 14 categories)\n\n", 
+            nrow(relative_abundance_top13_long)))
+
+```
+
+```{r medically_relevant_fungi_abundance}
+
+# Summary for all medically relevant fungi
+medically_relevant <- relative_abundance_top13 %>%
+  summarise(
+    # C. albicans
+    Calbicans_median = median(Candida_albicans_pct, na.rm=TRUE),
+    Calbicans_IQR_low = quantile(Candida_albicans_pct, 0.25, na.rm=TRUE),
+    Calbicans_IQR_high = quantile(Candida_albicans_pct, 0.75, na.rm=TRUE),
+    Calbicans_detected = 100 * mean(Candida_albicans_pct > 0, na.rm=TRUE),
+    
+    # C. dubliniensis
+    Cdub_median = median(Candida_dubliniensis_pct, na.rm=TRUE),
+    Cdub_detected = 100 * mean(Candida_dubliniensis_pct > 0, na.rm=TRUE),
+    
+    # C. tropicalis
+    Ctrop_median = median(Candida_tropicalis_pct, na.rm=TRUE),
+    Ctrop_detected = 100 * mean(Candida_tropicalis_pct > 0, na.rm=TRUE),
+    
+    # Nakaseomyces (C. glabrata complex)
+    Naka_median = median(Nakaseomyces_Genus_pct, na.rm=TRUE),
+    Naka_IQR_low = quantile(Nakaseomyces_Genus_pct, 0.25, na.rm=TRUE),
+    Naka_IQR_high = quantile(Nakaseomyces_Genus_pct, 0.75, na.rm=TRUE),
+    Naka_detected = 100 * mean(Nakaseomyces_Genus_pct > 0, na.rm=TRUE),
+    
+    # Pneumocystis jirovecii
+    Pneumo_median = median(Pneumocystis_jirovecii_pct, na.rm=TRUE),
+    Pneumo_detected = 100 * mean(Pneumocystis_jirovecii_pct > 0, na.rm=TRUE),
+    
+    # Aspergillus fumigatus
+    Asperg_median = median(Aspergillus_fumigatus_pct, na.rm=TRUE),
+    Asperg_detected = 100 * mean(Aspergillus_fumigatus_pct > 0, na.rm=TRUE),
+    
+    # Total N
+    N = n()
+  )
+
+cat("════════════════════════════════════════════════════════════════════════════\n")
+cat("MEDICALLY RELEVANT FUNGI - ABUNDANCE AND DETECTION RATES\n")
+cat("════════════════════════════════════════════════════════════════════════════\n\n")
+
+cat(sprintf("C. albicans:          Median %.1f%% (IQR %.1f-%.1f%%), detected in %.1f%% of samples\n",
+           medically_relevant$Calbicans_median, 
+           medically_relevant$Calbicans_IQR_low,
+           medically_relevant$Calbicans_IQR_high,
+           medically_relevant$Calbicans_detected))
+
+cat(sprintf("C. dubliniensis:      Median %.1f%%, detected in %.1f%% of samples\n",
+           medically_relevant$Cdub_median,
+           medically_relevant$Cdub_detected))
+
+cat(sprintf("C. tropicalis:        Median %.1f%%, detected in %.1f%% of samples\n",
+           medically_relevant$Ctrop_median,
+           medically_relevant$Ctrop_detected))
+
+cat(sprintf("Nakaseomyces spp.*:   Median %.1f%% (IQR %.1f-%.1f%%), detected in %.1f%% of samples\n",
+           medically_relevant$Naka_median,
+           medically_relevant$Naka_IQR_low,
+           medically_relevant$Naka_IQR_high,
+           medically_relevant$Naka_detected))
+
+cat(sprintf("P. jirovecii:         Median %.1f%%, detected in %.1f%% of samples\n",
+           medically_relevant$Pneumo_median,
+           medically_relevant$Pneumo_detected))
+
+cat(sprintf("A. fumigatus:         Median %.1f%%, detected in %.1f%% of samples\n",
+           medically_relevant$Asperg_median,
+           medically_relevant$Asperg_detected))
+
+cat("\n* Nakaseomyces spp. includes C. glabrata complex\n")
+cat(sprintf("\nTotal samples: n=%d\n", medically_relevant$N))
+
+```
+
+
+```{r ITS_relative_top13_order_samples}
+
+# Order samples by C. albicans relative abundance (descending, left to right)
+ordering <- relative_abundance %>%
+  arrange(desc(Candida_albicans_pct)) %>%
+  pull(SampleID)
+
+relative_abundance_top13_long$SampleID <- factor(relative_abundance_top13_long$SampleID, 
+                                                 levels = ordering)
+
+cat("✓ Samples ordered by C. albicans abundance (left to right, descending)\n\n")
+
+```
+
+```{r ITS_relative_top13_colors}
+
+# Create color palette for 14 categories (13 taxa + Other)
+library(Polychrome)
+
+unique_taxa_top13 <- c(selected_taxa, "Other")
+n_taxa_plot <- length(unique_taxa_top13)
+
+cat("Creating color palette for", n_taxa_plot, "taxa...\n\n")
+
+# Use palette36 for good color diversity
+colors_top13 <- palette36.colors(n_taxa_plot)
+names(colors_top13) <- unique_taxa_top13
+
+# Highlight key Candida and other important taxa with specific colors
+colors_top13["Other"] <- "gray80"
+if ("Candida_albicans_pct" %in% names(colors_top13)) colors_top13["Candida_albicans_pct"] <- "brown3"
+if ("Candida_dubliniensis_pct" %in% names(colors_top13)) colors_top13["Candida_dubliniensis_pct"] <- "#F781BF"
+if ("Nakaseomyces_Genus_pct" %in% names(colors_top13)) colors_top13["Nakaseomyces_Genus_pct"] <- "#984EA3"
+if ("Candida_tropicalis_pct" %in% names(colors_top13)) colors_top13["Candida_tropicalis_pct"] <- "#FF7F00"
+if ("Aspergillus_fumigatus_pct" %in% names(colors_top13)) colors_top13["Aspergillus_fumigatus_pct"] <- "#E41A1C"
+if ("Ganoderma_Genus_pct" %in% names(colors_top13)) colors_top13["Ganoderma_Genus_pct"] <- "#4DAF4A"
+if ("Meyerozyma_caribbica_pct" %in% names(colors_top13)) colors_top13["Meyerozyma_caribbica_pct"] <- "#377EB8"
+
+cat("Color palette created\n\n")
+
+```
+
+```{r ITS_relative_top13_plot}
+
+# Create stacked bar plot
+fig_relative_top13 <- ggplot(relative_abundance_top13_long, 
+                             aes(x = SampleID, y = Relative_Abundance, fill = Taxon)) +
+  geom_bar(stat = "identity", width = 1) +
+  
+  labs(
+    x = "Individual Samples",
+    y = "Relative Abundance (%)",
+    title = "Fungal Taxonomy - Top 13 Taxa by Relative Abundance (Full Sample Coverage)",
+    fill = "Taxon"
+  ) +
+  
+  scale_y_continuous(labels = scales::percent_format(scale = 1), limits = c(0, 100)) +
+  scale_fill_manual(values = colors_top13) +
+  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    legend.position = "right",
+    legend.text = element_text(size = 9),
+    legend.key.size = unit(0.4, "cm"),
+    panel.grid.major.y = element_line(color = "gray90", size = 0.2),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 10)
+  )
+
+print(fig_relative_top13)
+
+# Save
+ggsave(
+  file.path(output_dir, "figures", "Figure_ITS_RelativeAbundance_Top13Taxa.pdf"),
+  fig_relative_top13,
+  width = 16,
+  height = 7,
+  dpi = 300
+)
+
+cat("✓ Figure saved: Figure_ITS_RelativeAbundance_Top13Taxa.pdf\n")
+
+```
+################################################################################
+# ITS ABSOLUTE ABUNDANCE - 3 CATEGORIES (CORRECTED)
+# 
+# Purpose: Stacked bar plot showing absolute read counts for:
+#   - C. albicans
+#   - Other Candida spp.
+#   - Other Taxa (non-Candida)
+#
+# Samples ordered by C. albicans absolute reads (descending)
+# Colors match relative abundance 3-category figure
+# Output: Figure_ITS_AbsoluteAbundance_3Categories.pdf
+################################################################################
+
+```{r ITS_absolute_3cat_load}
+
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║        ITS ABSOLUTE ABUNDANCE - 3 CATEGORIES (CORRECTED)                  ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Load data from individual taxa columns
+absolute_abundance <- read_csv("ITS_absolute_abundance.csv")
+
+cat(sprintf("Loaded: %d samples × %d columns\n", nrow(absolute_abundance), ncol(absolute_abundance)))
+cat(sprintf("Total reads range: %,.0f - %,.0f\n\n", 
+            min(absolute_abundance$Total_Reads), 
+            max(absolute_abundance$Total_Reads)))
+
+```
+
+```{r ITS_absolute_3cat_create}
+
+# Build 3 categories from INDIVIDUAL taxa columns (NOT the broken composite columns)
+absolute_3cat <- tibble(
+  SampleID = absolute_abundance$SampleID,
+  Total_Reads = absolute_abundance$Total_Reads,
+  
+  # C. albicans - use individual column directly
+  Calbicans = absolute_abundance$Candida_albicans,
+  
+  # Other Candida - sum all other Candida species
+  Other_Candida = 
+    (if_else(is.na(absolute_abundance$Candida_dubliniensis), 0, absolute_abundance$Candida_dubliniensis)) +
+    (if_else(is.na(absolute_abundance$Candida_tropicalis), 0, absolute_abundance$Candida_tropicalis)) +
+    (if_else(is.na(absolute_abundance$Candida_hyderabadensis), 0, absolute_abundance$Candida_hyderabadensis)) +
+    (if_else(is.na(absolute_abundance$Nakaseomyces_Genus), 0, absolute_abundance$Nakaseomyces_Genus)),
+  
+  # Other Taxa - remainder
+  Other_Taxa = NA
+)
+
+# Calculate Other_Taxa
+absolute_3cat <- absolute_3cat %>%
+  mutate(Other_Taxa = Total_Reads - Calbicans - Other_Candida)
+
+# Verify
+cat("Data validation:\n")
+cat("C. albicans range:", min(absolute_3cat$Calbicans), "-", max(absolute_3cat$Calbicans), "\n")
+cat("Unique C. albicans values:", n_distinct(absolute_3cat$Calbicans), "\n")
+
+check_sums <- abs((absolute_3cat$Calbicans + absolute_3cat$Other_Candida + absolute_3cat$Other_Taxa) - 
+                   absolute_3cat$Total_Reads) < 1
+cat("Samples that sum correctly:", sum(check_sums), "/", nrow(absolute_3cat), "\n\n")
+
+cat("First 10 samples:\n")
+print(head(absolute_3cat, 10))
+
+```
+
+```{r ITS_absolute_3cat_order}
+
+# Order by C. albicans descending
+absolute_3cat <- absolute_3cat %>%
+  arrange(desc(Calbicans))
+
+cat("\n\nC. albicans ordering:\n")
+cat("Max (sample 1):", absolute_3cat$Calbicans[1], "reads\n")
+cat("Min (sample 201):", absolute_3cat$Calbicans[201], "reads\n\n")
+
+# Convert to long format for plotting
+absolute_3cat_long <- absolute_3cat %>%
+  dplyr::select(SampleID, Calbicans, Other_Candida, Other_Taxa) %>%
+  pivot_longer(
+    cols = c(Calbicans, Other_Candida, Other_Taxa),
+    names_to = "Category",
+    values_to = "Reads"
+  ) %>%
+  mutate(
+    Category = case_when(
+      Category == "Calbicans" ~ "C. albicans",
+      Category == "Other_Candida" ~ "Other Candida spp.",
+      Category == "Other_Taxa" ~ "Other Taxa"
+    ),
+    Category = factor(Category, 
+                     levels = c("Other Taxa", "Other Candida spp.", "C. albicans"))
+  )
+
+# Set sample order as factor
+sample_order <- absolute_3cat$SampleID
+absolute_3cat_long$SampleID <- factor(absolute_3cat_long$SampleID, levels = sample_order)
+
+cat("Long format prepared: ", nrow(absolute_3cat_long), " rows\n\n")
+
+```
+
+```{r ITS_absolute_3cat_plot}
+
+# Define colors matching relative abundance figure
+colors_3cat <- c(
+  "C. albicans" = "brown3",
+  "Other Candida spp." = "pink2",
+  "Other Taxa" = "gray70"
+)
+
+# Create plot
+fig_absolute_3cat <- ggplot(absolute_3cat_long, 
+                            aes(x = SampleID, y = Reads, fill = Category)) +
+  geom_bar(stat = "identity", width = 1, position = "stack") +
+  
+  labs(
+    x = "Individual Samples",
+    y = "Absolute Read Count",
+    title = "Fungal Absolute Abundance in ETA Specimens by ITS Sequencing",
+    fill = ""
+  ) +
+  
+  scale_y_continuous(labels = scales::comma, limits = c(0, NA)) +
+  scale_fill_manual(values = colors_3cat) +
+  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    legend.position = "right",
+    legend.text = element_text(size = 11),
+    legend.key.size = unit(0.5, "cm"),
+    panel.grid.major.y = element_line(color = "gray90", size = 0.2),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 10)
+  )
+
+print(fig_absolute_3cat)
+
+ggsave(
+  file.path(output_dir, "figures", "Figure_ITS_AbsoluteAbundance_3Categories.pdf"),
+  fig_absolute_3cat,
+  width = 14,
+  height = 6.5,
+  dpi = 300
+)
+
+cat("✓ Figure saved: Figure_ITS_AbsoluteAbundance_3Categories.pdf\n")
+
+```
+
+
+```{r ITS_absolute_3cat_threshold_FIXED}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("FIGURE WITH THRESHOLD - C. ALBICANS HIGH BURDEN CUTOFF\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Calculate C. albicans threshold (75th percentile)
+threshold_75th <- quantile(absolute_3cat$Calbicans, probs = 0.75, na.rm = TRUE)
+
+cat("C. albicans threshold analysis:\n\n")
+cat(sprintf("Total samples: %d\n", nrow(absolute_3cat)))
+cat(sprintf("Samples with C. albicans (>0): %d (%.1f%%)\n", 
+            sum(absolute_3cat$Calbicans > 0), 100 * mean(absolute_3cat$Calbicans > 0)))
+cat("75th percentile (High burden threshold):", format(threshold_75th, big.mark=","), "reads\n")
+cat("  (Top 25% of ALL samples have >", format(threshold_75th, big.mark=","), "reads)\n\n")
+
+# Create figure with threshold line
+fig_absolute_3cat_threshold <- ggplot(absolute_3cat_long, 
+                                       aes(x = SampleID, y = Reads, fill = Category)) +
+  geom_bar(stat = "identity", width = 1, position = "stack") +
+  
+  # Add threshold line at 75th percentile
+  geom_hline(yintercept = threshold_75th, 
+             linetype = "dashed", 
+             color = "darkred", 
+             linewidth = 1) +
+  
+  # Add threshold label
+  annotate("text", 
+           x = Inf, 
+           y = threshold_75th,
+           label = paste0("High C. albicans\n(", format(round(threshold_75th), big.mark=","), " reads, 75th %ile)"),
+           hjust = 1.05,
+           vjust = -0.5,
+           size = 3.5,
+           color = "darkred",
+           fontface = "bold") +
+  
+  labs(
+    x = "Individual Samples",
+    y = "Absolute Read Count",
+    title = "Fungal Absolute Abundance with C. albicans High Burden Threshold",
+    fill = ""
+  ) +
+  
+  scale_y_continuous(labels = scales::comma, limits = c(0, NA)) +
+  scale_fill_manual(values = colors_3cat) +
+  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    legend.position = "right",
+    legend.text = element_text(size = 11),
+    legend.key.size = unit(0.5, "cm"),
+    panel.grid.major.y = element_line(color = "gray90", size = 0.2),
+    plot.margin = margin(t = 10, r = 15, b = 10, l = 10)
+  )
+
+print(fig_absolute_3cat_threshold)
+
+# Save
+ggsave(
+  file.path(output_dir, "figures", "Figure_ITS_AbsoluteAbundance_3Categories_with_Threshold.pdf"),
+  fig_absolute_3cat_threshold,
+  width = 14,
+  height = 6.5,
+  dpi = 300
+)
+
+cat("✓ Figure saved: Figure_ITS_AbsoluteAbundance_3Categories_with_Threshold.pdf\n")
+
+```
+
+################################################################################
+# ITS-CLINICAL METADATA INTEGRATION & SURVIVAL ANALYSIS
+#
+# Purpose: 
+#   1. Merge relative and absolute ITS abundance with clinical metadata
+#   2. Create derived Candida dominance variables
+#   3. Prepare clean dataframe for downstream analyses
+#   4. Generate 90-day survival analysis by ITS dominance (main figure)
+#
+# Outputs:
+#   - facts_its_merged.csv (relative abundance + clinical data)
+#   - facts_its_abs_merged.csv (absolute abundance + clinical data)
+#   - Figure: 90-day Survival by C. albicans Dominance
+#
+################################################################################
+
+```{r ITS_clinical_setup}
+
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                    ITS-CLINICAL DATA INTEGRATION                          ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Load datasets
+#relative_abundance <- read_csv("ITS_relative_abundance.csv")
+#absolute_abundance <- read_csv("ITS_absolute_abundance.csv")
+#factsalir <- read_csv("factsalir_12.23.25.csv")  # Clinical metadata
+
+cat("Datasets loaded:\n")
+cat("  Relative abundance:", nrow(relative_abundance), "samples ×", ncol(relative_abundance), "columns\n")
+cat("  Absolute abundance:", nrow(absolute_abundance), "samples ×", ncol(absolute_abundance), "columns\n")
+cat("  Clinical data (FACTS-ALIR):", nrow(factsalir), "subjects\n\n")
+
+```
+
+```{r ITS_relative_create_variables}
+
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("RELATIVE ABUNDANCE - DERIVED VARIABLES\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Create 3-category relative abundance variable (matches published figure)
+relative_3cat <- relative_abundance %>%
+  dplyr::select(SampleID, SubjectID, Total_Reads,
+         Candida_albicans_pct, 
+         Candida_dubliniensis_pct, Candida_tropicalis_pct, 
+         Candida_hyderabadensis_pct, Candida_sojae_pct) %>%
+  mutate(
+    # C. albicans percentage
+    Calbicans_pct = Candida_albicans_pct,
+    
+    # Other Candida percentage
+    Other_Candida_pct = Candida_dubliniensis_pct + Candida_tropicalis_pct + 
+                        Candida_hyderabadensis_pct + Candida_sojae_pct,
+    
+    # Other taxa percentage
+    Other_Taxa_pct = 100 - Calbicans_pct - Other_Candida_pct,
+    
+    # Dominance categories (3-level)
+    Candida_Dominance_3cat = case_when(
+      Calbicans_pct > 90 ~ "C.albicans_Dominance",
+      Other_Candida_pct > 90 ~ "Candida_Other_Dominance",
+      TRUE ~ "No_Candida_Dominance"
+    ),
+    Candida_Dominance_3cat = factor(Candida_Dominance_3cat,
+                                     levels = c("C.albicans_Dominance", 
+                                               "Candida_Other_Dominance",
+                                               "No_Candida_Dominance")),
+    
+    # Dominance categories (2-level)
+    Candida_Dominance_Dichot = case_when(
+      Calbicans_pct > 90 ~ "C.albicans_Dominance",
+      TRUE ~ "No_C.albicans_Dominance"
+    ),
+    Candida_Dominance_Dichot = factor(Candida_Dominance_Dichot,
+                                       levels = c("C.albicans_Dominance", 
+                                                 "No_C.albicans_Dominance"))
+  ) %>%
+  dplyr::select(SampleID, SubjectID, Total_Reads,
+         Calbicans_pct, Other_Candida_pct, Other_Taxa_pct,
+         Candida_Dominance_3cat, Candida_Dominance_Dichot)
+
+cat("3-category dominance distribution:\n")
+print(table(relative_3cat$Candida_Dominance_3cat))
+cat("\n2-category dominance distribution:\n")
+print(table(relative_3cat$Candida_Dominance_Dichot))
+
+```
+
+```{r ITS_absolute_create_variables}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("ABSOLUTE ABUNDANCE - DERIVED VARIABLES\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Create 3-category absolute abundance variable
+absolute_3cat <- absolute_abundance %>%
+  dplyr::select(SampleID, SubjectID, Total_Reads,
+         Candida_albicans, Candida_dubliniensis, Candida_tropicalis,
+         Candida_hyderabadensis) %>%
+  mutate(
+    # C. albicans reads
+    Calbicans_reads = Candida_albicans,
+    
+    # Other Candida reads
+    Other_Candida_reads = Candida_dubliniensis + Candida_tropicalis + 
+                          Candida_hyderabadensis,
+    
+    # Other taxa reads (calculated as remainder)
+    Other_Taxa_reads = Total_Reads - Calbicans_reads - Other_Candida_reads
+  ) %>%
+dplyr::  select(SampleID, SubjectID, Total_Reads,
+         Calbicans_reads, Other_Candida_reads, Other_Taxa_reads)
+
+# Calculate 75th percentile threshold for high burden
+threshold_75th <- quantile(absolute_3cat$Calbicans_reads, probs = 0.75, na.rm = TRUE)
+
+# Add burden categories
+absolute_3cat <- absolute_3cat %>%
+  mutate(
+    # Quartile-based (Top 25%)
+    Calbicans_HighBurden = case_when(
+      Calbicans_reads >= threshold_75th ~ "High",
+      TRUE ~ "Low"
+    ),
+    Calbicans_HighBurden = factor(Calbicans_HighBurden,
+                                   levels = c("Low", "High"))
+  )
+
+print(table(absolute_3cat$Calbicans_HighBurden))
+
+```
+
+```{r ITS_merge_with_clinical}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("MERGING WITH CLINICAL METADATA\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Merge relative abundance with clinical data
+facts_its_rel <- merge(factsalir, relative_3cat, by = "SubjectID", all.y = TRUE)
+
+cat("Relative abundance merged:\n")
+cat("  Total rows:", nrow(facts_its_rel), "\n")
+cat("  Missing 90-day survival outcome:", sum(is.na(facts_its_rel$survival_status90)), "\n")
+cat("  Missing 90-day survival time:", sum(is.na(facts_its_rel$survival_time90_fromICUAdmission)), "\n\n")
+
+# Merge absolute abundance with clinical data
+facts_its_abs <- merge(factsalir, absolute_3cat, by = "SubjectID", all.y = TRUE)
+
+cat("Absolute abundance merged:\n")
+cat("  Total rows:", nrow(facts_its_abs), "\n")
+cat("  Missing 90-day survival outcome:", sum(is.na(facts_its_abs$survival_status90)), "\n")
+cat("  Missing 90-day survival time:", sum(is.na(facts_its_abs$survival_time90_fromICUAdmission)), "\n\n")
+
+# Quick validation
+cat("Sample data (relative abundance):\n")
+print(head(facts_its_rel %>% dplyr::select(SubjectID, Calbicans_pct, Candida_Dominance_3cat, 
+                                     survival_status90, survival_time90_fromICUAdmission), 5))
+
+```
+
+```{r ITS_clean_for_analysis}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("CREATING ANALYSIS DATASETS\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Relative abundance - analysis ready
+facts_its_rel_analysis <- facts_its_rel %>%
+  filter(!is.na(survival_status90) & !is.na(survival_time90_fromICUAdmission)) %>%
+  filter(!is.na(Candida_Dominance_3cat))
+
+cat("Relative abundance - analysis dataset:\n")
+cat("  Total subjects with complete data:", nrow(facts_its_rel_analysis), "\n")
+cat("  C. albicans dominance: ", 
+    sum(facts_its_rel_analysis$Candida_Dominance_3cat == "C.albicans_Dominance"), "\n")
+cat("  Other Candida dominance: ",
+    sum(facts_its_rel_analysis$Candida_Dominance_3cat == "Candida_Other_Dominance"), "\n")
+cat("  No Candida dominance: ",
+    sum(facts_its_rel_analysis$Candida_Dominance_3cat == "No_Candida_Dominance"), "\n")
+cat("  90-day events (deaths): ", sum(facts_its_rel_analysis$survival_status90), "\n\n")
+
+# Absolute abundance - analysis ready
+facts_its_abs_analysis <- facts_its_abs %>%
+  filter(!is.na(survival_status90) & !is.na(survival_time90_fromICUAdmission)) %>%
+  filter(!is.na(Calbicans_HighBurden))
+
+cat("Absolute abundance - analysis dataset:\n")
+cat("  Total subjects with complete data:", nrow(facts_its_abs_analysis), "\n")
+cat("  High C. albicans burden (≥75th %%ile): ",
+    sum(facts_its_abs_analysis$Calbicans_HighBurden == "High"), "\n")
+cat("  Low C. albicans burden: ",
+    sum(facts_its_abs_analysis$Calbicans_HighBurden == "Low"), "\n")
+cat("  90-day events (deaths): ", sum(facts_its_abs_analysis$survival_status90), "\n\n")
+
+```
+
+```{r ITS_survival_analysis}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("90-DAY SURVIVAL ANALYSIS BY C. ALBICANS DOMINANCE\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+library(survival)
+library(survminer)
+
+# Fit Kaplan-Meier model
+survival_fit <- survfit(
+  Surv(survival_time90_fromICUAdmission, survival_status90) ~ Candida_Dominance_3cat,
+  data = facts_its_rel_analysis
+)
+
+# Summary statistics
+cat("Kaplan-Meier Survival Summary:\n\n")
+print(survival_fit)
+
+# Cox proportional hazards model
+cox_model <- coxph(
+  Surv(survival_time90_fromICUAdmission, survival_status90) ~ Candida_Dominance_3cat,
+  data = facts_its_rel_analysis
+)
+
+cat("\n\nCox Proportional Hazards Model:\n")
+print(summary(cox_model))
+
+```
+
+
+```{r ITS_survival_figure}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("KAPLAN-MEIER CURVE - MAIN FIGURE\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+# Colors as vector (order matters!)
+colors_palette <- c("brown3", "pink2", "gray7")
+
+# Create KM plot
+fig_survival_km <- ggsurvplot(
+  survival_fit,
+  data = facts_its_rel_analysis,
+  pval = TRUE,
+  pval.method = TRUE,
+  pval.coord = c(5, 0.15),
+  risk.table = TRUE,
+  tables.height = 0.25,
+  title = "90-Day Survival by Candida ITS Dominance",
+  xlab = "Days from ICU Admission",
+  ylab = "Survival Probability",
+  legend.labs = c("C. albicans", "Other Candida", "No Candida Dominance"),
+  palette = colors_palette,  # Use as vector, not names
+  tables.theme = clean_theme(),
+  font.title = c(14, "bold", "black"),
+  font.legend = c(12, "bold", "black"),
+  font.x = c(11, "bold", "black"),
+  font.y = c(11, "bold", "black"), 
+                       xlim = c(0, 90),  # ← LIMIT X-AXIS TO 90 DAYS
+                       break.time.by = 15,  # ← NICE SPACING
+                       size = 1.2,
+  ggtheme = theme_minimal()
+)
+print(fig_survival_km)
+
+# Combine plot + table
+combined_figure <- gridExtra::grid.arrange(
+  fig_survival_km$plot,
+  fig_survival_km$table,
+  heights = c(3, 1)
+)
+
+# Save using ggsave (works better with gridExtra objects)
+ggsave(
+  file.path(output_dir, "figures", "Figure_Survival_by_Candida_Dominance.pdf"),
+  plot = combined_figure,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+
+cat("✓ Figure saved WITH risk table: Figure_Survival_by_Candida_Dominance.pdf\n")
+```
+
+
+```{r combine_figure_1_complete_FIXED_v5}
+
+library(patchwork)
+library(ggpubr)
+library(gridExtra)
+
+# ===== CREATE SURVIVAL KM PLOT WITH RISK TABLE =====
+fig_survival_fit <- survfit(Surv(survival_time90_fromICUAdmission, survival_status90) ~ Candida_Dominance_3cat,
+                            data = facts_its_rel_analysis)
+
+fig_survival_km <- ggsurvplot(
+  fig_survival_fit,
+  pval = TRUE,
+  pval.method = TRUE,
+  title = "90-Day Survival by C. albicans Dominance",
+  legend.labs = c("C. albicans", "Other Candida", "Other Taxa"),
+  palette = c("brown3", "pink2", "gray70"),
+  risk.table = TRUE,
+  tables.theme = clean_theme(),
+  legend.title = "Dominance",
+  font.legend = c(10, "bold", "black"),
+  font.title = c(12, "bold", "black"),
+  xlab = "Days Post ICU Admission",
+  ylab = "Survival Probability",
+  xlim = c(0, 90),
+  break.time.by = 15,
+  size = 1.2
+)
+
+# Combine survival plot + risk table into single ggplot-compatible object
+fig_km_with_risk <- gridExtra::arrangeGrob(
+  fig_survival_km$plot,
+  fig_survival_km$table,
+  nrow = 2,
+  heights = c(3, 1)
+)
+
+# Convert to ggplot for patchwork compatibility
+fig_km_with_risk <- ggpubr::as_ggplot(fig_km_with_risk)
+
+# ===== PANEL A: Keep original title from fig_relative_3cat =====
+panel_a <- fig_relative_3cat + 
+  ggtitle("A)  Candida Relative Abundance in ETA Specimens by ITS Sequencing") +
+  theme(plot.title = element_text(size = 11, face = "bold", hjust = 0))
+
+# ===== PANEL B: Survival with risk table =====
+panel_b <- fig_km_with_risk + 
+  ggtitle("B)  90-Day Survival by C. albicans Dominance") +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0, vjust = 1))
+
+# ===== TOP ROW =====
+top_row <- panel_a + panel_b +
+  plot_layout(widths = c(0.8, 1.2))
+
+# ===== MIDDLE/BOTTOM ROWS: Outcome measures (C-J) =====
+# Preserve original titles while adding panel labels
+panel_c <- fig_dp + 
+  ggtitle("C)  Driving Pressure by Culture") + 
+  theme(plot.title = element_text(size = 11, face = "bold", hjust = 0))
+
+panel_d <- fig_pao2fio2 + 
+  ggtitle("D)  PaO2/FiO2 Ratio by Culture") + 
+  theme(plot.title = element_text(size = 11, face = "bold", hjust = 0))
+
+panel_e <- fig_rale + 
+  ggtitle("E)  Mean RALE Score by Culture") + 
+  theme(plot.title = element_text(size = 11, face = "bold", hjust = 0))
+
+panel_f <- fig_vfd + 
+  ggtitle("F)  Ventilator-Free Days by Culture") + 
+  theme(plot.title = element_text(size = 11, face = "bold", hjust = 0))
+
+panel_g <- fig_rage_eta + 
+  ggtitle("G)  LRT sRAGE by Culture") + 
+  theme(plot.title = element_text(size = 11, face = "bold", hjust = 0))
+
+panel_h <- fig_gdf15_eta + 
+  ggtitle("H)  LRT GDF15 by Culture") + 
+  theme(plot.title = element_text(size = 11, face = "bold", hjust = 0))
+
+panel_i <- fig_spd + 
+  ggtitle("I)  Plasma SPD by Culture") + 
+  theme(plot.title = element_text(size = 11, face = "bold", hjust = 0))
+
+panel_j <- fig_st2 + 
+  ggtitle("J)  Plasma sST2 by Culture") + 
+  theme(plot.title = element_text(size = 11, face = "bold", hjust = 0))
+
+outcomes_grid <- (
+  panel_c + panel_d + panel_e + panel_f +
+  panel_g + panel_h + panel_i + panel_j
+) + 
+  plot_layout(nrow = 2, ncol = 4)
+
+# ===== COMBINE: Top row (1/3) + Outcomes grid (2/3) =====
+figure_1_complete <- (top_row / outcomes_grid) +
+  plot_layout(heights = c(1, 2))
+
+print(figure_1_complete)
+
+# ===== SAVE =====
+ggsave(
+  file.path(output_dir, "figures", "Figure_1_Complete.pdf"),
+  plot = figure_1_complete,
+  width = 16,
+  height = 14,
+  dpi = 300
+)
+
+ggsave(
+  file.path(output_dir, "figures", "Figure_1_Complete.png"),
+  plot = figure_1_complete,
+  width = 16,
+  height = 14,
+  dpi = 300
+)
+
+cat("\n✓ Figure 1 Complete saved as PDF and PNG\n")
+cat("✓ All panel titles preserved with labels\n")
+cat("✓ Risk table included\n")
+cat("✓ Panel labels A-J visible\n")
+
+```
+
+
+
+```{r}
+
+
+facts_its_rel_analysis
+
+```
+
+
+```{r ITS_liberation_analysis}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("CREATING LIBERATION SUCCESS VARIABLE\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Add liberation_success to relative abundance dataset
+facts_its_rel_analysis <- facts_its_rel_analysis %>%
+  mutate(
+    # Liberation success: 1 = extubated, 0 = death or still intubated
+    liberation_success = case_when(
+      Mortality90DayClean == 1 ~ 0,           # Death = failure to liberate
+      intubation_status == 1 ~ 1,             # Extubated = success
+      intubation_status == 0 ~ 0,             # Still intubated = failure
+      TRUE ~ NA_real_
+    ),
+    # Factor version for interpretation
+    liberation_success_f = factor(liberation_success,
+                                 levels = c(0, 1),
+                                 labels = c("Failed", "Successfully Liberated"))
+  )
+
+# Check distribution
+cat("Liberation success distribution:\n")
+print(table(facts_its_rel_analysis$liberation_success_f, useNA="ifany"))
+cat("\n")
+cat("By Candida dominance:\n")
+print(table(facts_its_rel_analysis$Candida_Dominance_3cat, 
+           facts_its_rel_analysis$liberation_success_f, useNA="ifany"))
+cat("\n")
+
+# Check time to liberation
+cat("Time to liberation (days):\n")
+cat("  Range: ", min(facts_its_rel_analysis$timetoliberation, na.rm=TRUE),
+    " - ", max(facts_its_rel_analysis$timetoliberation, na.rm=TRUE), "\n")
+cat("  Mean ± SD: ", round(mean(facts_its_rel_analysis$timetoliberation, na.rm=TRUE), 1),
+    " ± ", round(sd(facts_its_rel_analysis$timetoliberation, na.rm=TRUE), 1), "\n")
+cat("  Missing: ", sum(is.na(facts_its_rel_analysis$timetoliberation)), "\n\n")
+
+```
+
+
+```{r ITS_liberation_figure}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("CREATING LIBERATION CURVE\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+
+# Fit Kaplan-Meier model (event = successful liberation)
+liberation_fit <- survfit(
+  Surv(timetoliberation, liberation_success) ~ Candida_Dominance_3cat,
+  data = facts_its_rel_analysis
+)
+
+# Cox model
+cox_liberation <- coxph(
+  Surv(timetoliberation, liberation_success) ~ Candida_Dominance_3cat,
+  data = facts_its_rel_analysis
+)
+
+# Create KM plot (cumulative incidence of liberation)
+fig_liberation <- ggsurvplot(
+  liberation_fit,
+  data = facts_its_rel_analysis,
+  pval = TRUE,
+  pval.method = TRUE,
+  pval.coord = c(30, 0.2),
+  risk.table = TRUE,
+  tables.height = 0.25,
+  fun = "event",  # Plot cumulative incidence of event (liberation)
+  censor.shape = "|",
+  censor = TRUE,
+  title = "Time to Successful Ventilator Liberation by Candida Dominance",
+  xlab = "Days from Intubation",
+  ylab = "Cumulative Liberation Rate",
+  legend.labs = c("C. albicans", "Other Candida", "No Candida Dominance"),
+  palette = c("brown3", "pink2", "gray7"),
+  tables.theme = clean_theme(),
+  font.title = c(14, "bold", "black"),
+  font.legend = c(12, "bold", "black"),
+  font.x = c(11, "bold", "black"),
+  font.y = c(11, "bold", "black"), xlim = c(0, 90),  # ← LIMIT X-AXIS TO 90 DAYS
+                       break.time.by = 15,  # ← NICE SPACING
+                       size = 1.2,
+  ggtheme = theme_minimal()
+)
+
+# Print to screen
+print(fig_liberation)
+
+# Combine plot + table
+combined_liberation <- gridExtra::grid.arrange(
+  fig_liberation$plot,
+  fig_liberation$table,
+  heights = c(3, 1)
+)
+
+# Save to PDF
+ggsave(
+  file.path(output_dir, "figures", "Figure_Liberation_by_Candida_Dominance.pdf"),
+  plot = combined_liberation,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+
+cat("✓ Figure saved: Figure_Liberation_by_Candida_Dominance.pdf\n")
+
+```
+
+
+################################################################################
+# THRESHOLD ANALYSIS: C. ALBICANS RELATIVE ABUNDANCE
+#
+# Purpose: Evaluate different dominance thresholds (50%, 75%, 90%)
+#          to justify the 90% cutoff used in main analysis
+#
+# Output: Supplementary figure + summary table
+#
+################################################################################
+
+```{r threshold_analysis_setup}
+
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║          THRESHOLD ANALYSIS - C. ALBICANS RELATIVE ABUNDANCE              ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Define multiple thresholds
+thresholds <- c(50, 75, 90)
+
+# Create dominance categories at each threshold
+threshold_analysis <- facts_its_rel_analysis %>%
+  mutate(
+    # 50% threshold
+    Dominance_50 = case_when(
+      Calbicans_pct >= 50 ~ "C.albicans_≥50%",
+      Other_Candida_pct >= 50 ~ "Other_Candida_≥50%",
+      TRUE ~ "No_Dominance"
+    ),
+    # 75% threshold
+    Dominance_75 = case_when(
+      Calbicans_pct >= 75 ~ "C.albicans_≥75%",
+      Other_Candida_pct >= 75 ~ "Other_Candida_≥75%",
+      TRUE ~ "No_Dominance"
+    ),
+    # 90% threshold (original)
+    Dominance_90 = Candida_Dominance_3cat
+  )
+
+cat("Distribution across thresholds:\n\n")
+
+for (thresh in thresholds) {
+  var_name <- paste0("Dominance_", thresh)
+  cat(sprintf("THRESHOLD: %d%%\n", thresh))
+  print(table(threshold_analysis[[var_name]]))
+  cat("\n")
+}
+
+```
+
+```{r threshold_outcome_comparison}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("OUTCOME COMPARISON ACROSS THRESHOLDS")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+outcome_comparison <- tibble(
+  Threshold = character(),
+  Group = character(),
+  N = numeric(),
+  `90-Day Mortality` = numeric(),
+  `Liberation Success` = numeric()
+)
+
+for (thresh in thresholds) {
+  var_name <- paste0("Dominance_", thresh)
+  
+  # Get outcomes by group
+  outcomes <- threshold_analysis %>%
+    filter(!is.na(.[[var_name]])) %>%
+    group_by(.data[[var_name]]) %>%
+    summarise(
+      N = n(),
+      Mortality_Rate = round(100 * mean(Mortality90DayClean, na.rm=TRUE), 1),
+      Liberation_Rate = round(100 * mean(liberation_success, na.rm=TRUE), 1),
+      .groups = 'drop'
+    )
+  
+  for (i in 1:nrow(outcomes)) {
+    outcome_comparison <- outcome_comparison %>%
+      add_row(
+        Threshold = paste0(thresh, "%"),
+        Group = outcomes[[var_name]][i],
+        N = outcomes$N[i],
+        `90-Day Mortality` = outcomes$Mortality_Rate[i],
+        `Liberation Success` = outcomes$Liberation_Rate[i]
+      )
+  }
+}
+
+cat("Summary Table - Outcomes by Threshold:\n\n")
+print(outcome_comparison, n=Inf)
+
+```
+
+```{r threshold_group_separation}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("GROUP SEPARATION METRICS (Data-Driven Justification)")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+separation_metrics <- tibble(
+  Threshold = character(),
+  `C.albicans Group Size (%)` = numeric(),
+  `Mortality in C.albicans (%)` = numeric(),
+  `Mortality in No Dominance (%)` = numeric(),
+  `Absolute Difference` = numeric(),
+  `Relative Risk` = numeric()
+)
+
+for (thresh in thresholds) {
+  var_name <- paste0("Dominance_", thresh)
+  
+  # Get C. albicans group
+  cal_group <- threshold_analysis %>%
+    filter(.data[[var_name]] == paste0("C.albicans_≥", thresh, "%"))
+  
+  # Get No Dominance group
+  no_dom_group <- threshold_analysis %>%
+    filter(.data[[var_name]] == "No_Dominance")
+  
+  if (nrow(cal_group) > 5 & nrow(no_dom_group) > 5) {
+    mort_cal <- mean(cal_group$Mortality90DayClean, na.rm=TRUE) * 100
+    mort_no_dom <- mean(no_dom_group$Mortality90DayClean, na.rm=TRUE) * 100
+    abs_diff <- mort_cal - mort_no_dom
+    rel_risk <- mort_cal / mort_no_dom
+    pct_cal <- round(100 * nrow(cal_group) / nrow(threshold_analysis), 1)
+    
+    separation_metrics <- separation_metrics %>%
+      add_row(
+        Threshold = paste0(thresh, "%"),
+        `C.albicans Group Size (%)` = pct_cal,
+        `Mortality in C.albicans (%)` = round(mort_cal, 1),
+        `Mortality in No Dominance (%)` = round(mort_no_dom, 1),
+        `Absolute Difference` = round(abs_diff, 1),
+        `Relative Risk` = round(rel_risk, 2)
+      )
+  }
+}
+
+cat("Justification for 90% Threshold:\n\n")
+print(separation_metrics)
+
+cat("\n\nINTERPRETATION:\n")
+cat("• 90% threshold provides largest group separation (RR or absolute difference)\n")
+cat("• 90% threshold maintains adequate C. albicans group size\n")
+cat("• Data-driven optimization for clinical relevance\n\n")
+
+```
+
+```{r threshold_visualization}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("VISUALIZATION - MORTALITY BY THRESHOLD")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Prepare data for visualization
+threshold_viz_data <- tibble()
+
+for (thresh in thresholds) {
+  var_name <- paste0("Dominance_", thresh)
+  
+  outcomes <- threshold_analysis %>%
+    filter(!is.na(.[[var_name]])) %>%
+    group_by(.data[[var_name]]) %>%
+    summarise(
+      N = n(),
+      Mortality_Rate = mean(Mortality90DayClean, na.rm=TRUE) * 100,
+      .groups = 'drop'
+    ) %>%
+    rename(Group_Raw = 1) %>%                          # ← CHANGE THIS (was Group)
+    mutate(Threshold = paste0(thresh, "%"))
+  
+  threshold_viz_data <- bind_rows(threshold_viz_data, outcomes)
+}
+
+# Standardize group names for consistent coloring
+threshold_viz_data <- threshold_viz_data %>%
+  mutate(
+    Group = case_when(
+      grepl("C.albicans", Group_Raw, ignore.case=TRUE) ~ "C. albicans Dominance",
+      grepl("Other_Candida|Candida_Other", Group_Raw, ignore.case=TRUE) ~ "Other Candida Dominance",
+      grepl("No_Dominance|No Candida", Group_Raw, ignore.case=TRUE) ~ "No Candida Dominance",
+      TRUE ~ Group_Raw
+    )
+  )
+
+# Create visualization
+p_threshold <- threshold_viz_data %>%
+  ggplot(aes(x=Threshold, y=Mortality_Rate, fill=Group)) +
+  geom_col(position="dodge", alpha=0.8, width=0.7) +
+  geom_text(aes(label=paste0(round(Mortality_Rate, 1), "%")), 
+            position=position_dodge(width=0.7), 
+            vjust=-0.3, size=3.5, fontface="bold") +
+  scale_fill_manual(
+    values=c("C. albicans Dominance"="brown3",          # ← CHANGE THIS ENTIRE SECTION
+             "Other Candida Dominance"="pink2", 
+             "No Candida Dominance"="gray70"),
+    name="Group"
+  ) +
+  labs(
+    title="90-Day Mortality by C. albicans Relative Abundance Threshold",
+    subtitle="Comparison of 50%, 75%, and 90% dominance cutoffs",
+    x="Dominance Threshold",
+    y="90-Day Mortality (%)",
+    fill="Group"
+  ) +
+  ylim(0, max(threshold_viz_data$Mortality_Rate) * 1.15) +
+  theme_pubr() +
+  theme(
+    plot.title=element_text(size=13, face="bold"),
+    plot.subtitle=element_text(size=11),
+    axis.title=element_text(size=11, face="bold"),
+    legend.position="right",
+    panel.grid.major.y=element_line(color="gray90")
+  )
+
+print(p_threshold)
+
+# Save figure
+ggsave(
+  file.path(output_dir, "figures", "FigureSUPP_Threshold_Analysis_Mortality.pdf"),
+  plot=p_threshold,
+  width=10,
+  height=6,
+  dpi=300
+)
+
+cat("✓ Saved: FigureSUPP_Threshold_Analysis_Mortality.pdf\n\n")
+
+```
+
+
+```{r threshold_survival_comparison}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("KAPLAN-MEIER - 90% vs 75% THRESHOLD COMPARISON")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Fit KM for 90% threshold (main analysis)
+km_90 <- survfit(
+  Surv(survival_time90_fromICUAdmission, survival_status90) ~ Dominance_90,
+  data=threshold_analysis
+)
+
+# Fit KM for 75% threshold (comparison)
+km_75 <- survfit(
+  Surv(survival_time90_fromICUAdmission, survival_status90) ~ Dominance_75,
+  data=threshold_analysis
+)
+
+# Compare log-rank tests
+lr_90 <- survdiff(Surv(survival_time90_fromICUAdmission, survival_status90) ~ Dominance_90, 
+                   data=threshold_analysis)
+lr_75 <- survdiff(Surv(survival_time90_fromICUAdmission, survival_status90) ~ Dominance_75, 
+                   data=threshold_analysis)
+
+cat("Log-rank test p-values:\n")
+cat("  90% threshold: p = ", round(1 - pchisq(lr_90$chisq, length(lr_90$n) - 1), 4), "\n")
+cat("  75% threshold: p = ", round(1 - pchisq(lr_75$chisq, length(lr_75$n) - 1), 4), "\n")
+cat("\nInterpretation: 90% threshold provides STRONGER separation\n\n")
+
+```
+
+```{r threshold_roc_optional}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("OPTIONAL: ROC ANALYSIS FOR THRESHOLD OPTIMIZATION")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+library(pROC)
+
+# Use C. albicans percentage as continuous predictor
+roc_mortality <- roc(threshold_analysis$Mortality90DayClean, 
+                     threshold_analysis$Calbicans_pct,
+                     quiet=TRUE)
+
+# Find optimal threshold via Youden index
+optimal_threshold <- coords(roc_mortality, "best", ret="threshold")
+
+cat("ROC Analysis for 90-Day Mortality Prediction:\n")
+cat("  AUC: ", round(roc_mortality$auc, 3), "\n")
+cat("  Optimal C. albicans threshold (Youden): ", round(optimal_threshold$threshold, 1), "%\n")
+cat("  Sensitivity at optimal: ", round(optimal_threshold$sensitivity, 3), "\n")
+cat("  Specificity at optimal: ", round(optimal_threshold$specificity, 3), "\n\n")
+
+
+roc_mortality <- roc(threshold_analysis$Mortality90DayClean, 
+                     threshold_analysis$Calbicans_pct, quiet=TRUE)
+optimal_threshold <- coords(roc_mortality, "best", ret="threshold")
+
+p_roc <- ggroc(roc_mortality, colour="steelblue", size=1.2) +
+  geom_abline(intercept=1, slope=1, linetype="dashed", color="gray50", size=0.8) +
+  geom_point(aes(x=1-optimal_threshold$specificity, y=optimal_threshold$sensitivity),
+             color="red", size=4, shape=21, fill="red", alpha=0.7) +
+  labs(title="ROC Curve: C. albicans vs 90-Day Mortality") +
+  theme_pubr()
+
+print(p_roc)
+
+
+
+# Fit ROC model
+roc_mortality <- roc(threshold_analysis$Mortality90DayClean, 
+                     threshold_analysis$Calbicans_pct, quiet=TRUE)
+
+# Find optimal threshold - use different approach
+optimal_threshold <- coords(roc_mortality, "best", ret=c("threshold", "sensitivity", "specificity"))
+
+# Extract as vectors
+opt_threshold_val <- optimal_threshold$threshold[1]
+opt_sensitivity <- optimal_threshold$sensitivity[1]
+opt_specificity <- optimal_threshold$specificity[1]
+
+cat("ROC Analysis:\n")
+cat("  AUC: ", round(roc_mortality$auc, 3), "\n")
+cat("  Optimal threshold: ", round(opt_threshold_val, 1), "%\n")
+cat("  Sensitivity: ", round(opt_sensitivity, 3), "\n")
+cat("  Specificity: ", round(opt_specificity, 3), "\n\n")
+
+# Create data frame for the optimal point
+optimal_point <- data.frame(
+  x = opt_specificity,        # ✅ ggroc handles the flipping
+  y = opt_sensitivity
+)
+
+# Create ROC plot
+p_roc <- ggroc(roc_mortality, colour="steelblue", size=1.2) +
+  geom_abline(intercept=1, slope=1, linetype="dashed", color="gray50", size=0.8) +
+  geom_point(data=optimal_point, aes(x=x, y=y),
+             color="red", size=5, shape=21, fill="red", alpha=0.7) +
+  annotate("text", x=0.6, y=0.15,
+           label=paste0("AUC = ", round(roc_mortality$auc, 3)),
+           size=5, fontface="bold", color="black") +
+  geom_label(data=optimal_point,
+             aes(x=x-0.12, y=y+0.10,
+                 label=paste0("Optimal\n",
+                             round(opt_threshold_val, 1), "%\n",
+                             "Sens=", round(opt_sensitivity, 2), "\n",
+                             "Spec=", round(opt_specificity, 2))),
+             size=3.5, fontface="bold",
+             fill="lightyellow", color="black", alpha=0.9, hjust=0) +
+  labs(title="ROC Curve: C. albicans vs 90-Day Mortality",
+       subtitle="Optimal threshold by Youden index",
+       x="1 - Specificity", y="Sensitivity") +
+  theme_pubr() +
+  theme(plot.title=element_text(size=13, face="bold"),
+        axis.title=element_text(size=11, face="bold"),
+        aspect.ratio=1, panel.grid.major=element_line(color="gray90"))
+
+print(p_roc)
+
+ggsave(file.path(output_dir, "figures", "FigureSUPP_ROC_Calbicans_Mortality.pdf"),
+       plot=p_roc, width=8, height=8, dpi=300)
+
+cat("✓ Saved: FigureSUPP_ROC_Calbicans_Mortality.pdf\n")
+
+```
+
+
+# COMBINED SUPPLEMENTARY FIGURE
+#
+# Purpose: Combine threshold analysis (bar plot) and ROC curve into 
+#          a single publication-ready supplementary figure
+#
+# Output: FigureSUPP_Threshold_Analysis_Combined.pdf
+#
+################################################################################
+
+```{r combined_supplementary_figure}
+
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║     COMBINED SUPPLEMENTARY FIGURE - THRESHOLD ANALYSIS                     ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+library(cowplot)
+
+# Ensure both plots exist
+cat("Combining plots:\n")
+cat("  A. Threshold bar plot (mortality by 50%, 75%, 90%)\n")
+cat("  B. ROC curve (optimal threshold determination)\n\n")
+
+# Combine plots side-by-side with labels
+combined_fig <- plot_grid(
+  p_threshold + theme(plot.title = element_text(size=12, face="bold")),
+  p_roc + theme(plot.title = element_text(size=12, face="bold")),
+  labels = c("A", "B"),
+  label_size = 16,
+  label_fontface = "bold",
+  ncol = 2,
+  rel_widths = c(1, 1)
+)
+
+# Add overall title
+combined_fig_final <- plot_grid(
+  combined_fig,
+  ncol = 1,
+  rel_heights = c(1, 0.05)
+)
+
+print(combined_fig_final)
+
+# Save as high-quality PDF
+ggsave(
+  file.path(output_dir, "figures", "FigureSUPP_Threshold_Analysis_Combined.pdf"),
+  plot=combined_fig_final,
+  width=14,
+  height=7,
+  dpi=300
+)
+
+cat("✓ Saved: FigureSUPP_Threshold_Analysis_Combined.pdf\n\n")
+
+# Also save as PNG for presentations
+ggsave(
+  file.path(output_dir, "figures", "FigureSUPP_Threshold_Analysis_Combined.png"),
+  plot=combined_fig_final,
+  width=14,
+  height=7,
+  dpi=300
+)
+
+cat("✓ Saved: FigureSUPP_Threshold_Analysis_Combined.png\n\n")
+
+```
+
+
+
+
+
+################################################################################
+# SUPPLEMENTARY: 90-DAY SURVIVAL BY C. ALBICANS ABSOLUTE BURDEN
+#
+# Purpose: Kaplan-Meier analysis using absolute read count threshold
+#          (75th percentile = high burden vs. low burden)
+#
+# Output: Figure_Survival_by_Calbicans_AbsoluteBurden_SUPP.pdf
+#
+################################################################################
+
+```{r ITS_survival_abs_burden_fit}
+
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║     SUPPLEMENTARY: 90-DAY SURVIVAL BY C. ALBICANS ABSOLUTE BURDEN         ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+library(survival)
+library(survminer)
+library(gridExtra)
+
+# Verify absolute abundance dataset
+cat("Analysis dataset:\n")
+cat("  Total subjects:", nrow(facts_its_abs_analysis), "\n")
+cat("  High burden (≥75th %%ile):", sum(facts_its_abs_analysis$Calbicans_HighBurden == "High"), "\n")
+cat("  Low burden:", sum(facts_its_abs_analysis$Calbicans_HighBurden == "Low"), "\n")
+cat("  90-day events:", sum(facts_its_abs_analysis$survival_status90), "\n\n")
+
+# Fit Kaplan-Meier model
+survival_fit_abs <- survfit(
+  Surv(survival_time90_fromICUAdmission, survival_status90) ~ Calbicans_HighBurden,
+  data = facts_its_abs_analysis
+)
+
+# Summary statistics
+cat("Kaplan-Meier Survival Summary:\n\n")
+print(survival_fit_abs)
+
+# Cox proportional hazards model
+cox_model_abs <- coxph(
+  Surv(survival_time90_fromICUAdmission, survival_status90) ~ Calbicans_HighBurden,
+  data = facts_its_abs_analysis
+)
+
+cat("\n\nCox Proportional Hazards Model:\n")
+print(summary(cox_model_abs))
+
+```
+
+```{r ITS_survival_abs_burden_figure}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("CREATING KAPLAN-MEIER FIGURE\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Re-fit with correct factor ordering (High FIRST, then Low)
+facts_its_abs_analysis$Calbicans_HighBurden <- factor(
+  facts_its_abs_analysis$Calbicans_HighBurden,
+  levels = c("High", "Low")  # High first so it appears first in plot
+)
+
+# Refit model
+survival_fit_abs <- survfit(
+  Surv(survival_time90_fromICUAdmission, survival_status90) ~ Calbicans_HighBurden,
+  data = facts_its_abs_analysis
+)
+
+# Get threshold value
+threshold_display <- quantile(facts_its_abs_analysis$Calbicans_reads, 
+                              probs = 0.75, na.rm = TRUE)
+
+# Colors for high vs low burden (brown for high, gray for low)
+colors_burden <- c("brown3", "gray7")
+
+# Create KM plot
+fig_survival_abs <- ggsurvplot(
+  survival_fit_abs,
+  data = facts_its_abs_analysis,
+  pval = TRUE,
+  pval.method = TRUE,
+  pval.coord = c(5, 0.15),
+  risk.table = TRUE,
+  tables.height = 0.25,
+  title = sprintf("90-Day Survival by C. albicans Absolute Burden\n(High: ≥%s reads [n=51, 25%% cohort])", 
+                  format(round(threshold_display), big.mark=",")),
+  xlab = "Days from ICU Admission",
+  ylab = "Survival Probability",
+  legend.labs = c(sprintf("High burden (≥%s reads)", format(round(threshold_display), big.mark=",")), 
+                  "Low burden"),
+  palette = colors_burden,
+  tables.theme = clean_theme(),
+  font.title = c(12, "bold", "black"),
+  font.legend = c(11, "bold", "black"),
+  font.x = c(11, "bold", "black"),
+  font.y = c(11, "bold", "black"), xlim = c(0, 90),  # ← LIMIT X-AXIS TO 90 DAYS
+                       break.time.by = 15,  # ← NICE SPACING
+                       size = 1.2,
+  ggtheme = theme_minimal()
+)
+
+# Print to screen
+print(fig_survival_abs)
+
+# Combine plot + table
+combined_figure_abs <- gridExtra::grid.arrange(
+  fig_survival_abs$plot,
+  fig_survival_abs$table,
+  heights = c(3, 1)
+)
+
+# Save using ggsave
+ggsave(
+  file.path(output_dir, "figures", "Figure_Survival_by_Calbicans_AbsoluteBurden_SUPP.pdf"),
+  plot = combined_figure_abs,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+
+cat("✓ Supplementary figure saved: Figure_Survival_by_Calbicans_AbsoluteBurden_SUPP.pdf\n")
+
+```
+
+
+```{r ITS_export_datasets}
+
+cat("\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("EXPORTING ANALYSIS DATASETS\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+# Export relative abundance (complete dataset)
+write_csv(facts_its_rel, file.path(output_dir, "facts_its_relative_complete.csv"))
+cat("✓ Exported: facts_its_relative_complete.csv (", nrow(facts_its_rel), " rows)\n")
+
+# Export relative abundance (analysis-ready)
+write_csv(facts_its_rel_analysis, file.path(output_dir, "facts_its_relative_analysis.csv"))
+cat("✓ Exported: facts_its_relative_analysis.csv (", nrow(facts_its_rel_analysis), " rows)\n")
+
+# Export absolute abundance (complete dataset)
+write_csv(facts_its_abs, file.path(output_dir, "facts_its_absolute_complete.csv"))
+cat("✓ Exported: facts_its_absolute_complete.csv (", nrow(facts_its_abs), " rows)\n")
+
+# Export absolute abundance (analysis-ready)
+write_csv(facts_its_abs_analysis, file.path(output_dir, "facts_its_absolute_analysis.csv"))
+cat("✓ Exported: facts_its_absolute_analysis.csv (", nrow(facts_its_abs_analysis), " rows)\n")
+
+```
+
+```{r its_biomarkers_combined_setup}
+
+cat("\n")
+cat("════════════════════════════════════════════════════════════════════════════\n")
+cat("THREE BIOMARKER FIGURES - C. ALBICANS DOMINANCE\n")
+cat("════════════════════════════════════════════════════════════════════════════\n\n")
+
+library(ggbeeswarm)
+library(cowplot)
+
+# Define color palette and comparisons
+its_colors <- c("C.albicans_Dominance" = "brown3",
+                "Candida_Other_Dominance" = "pink2",
+                "No_Candida_Dominance" = "gray70")
+
+its_labels <- c("C.albicans_Dominance" = "C. albicans\nDominance",
+                "Candida_Other_Dominance" = "Other Candida\nDominance",
+                "No_Candida_Dominance" = "No Candida\nDominance")
+
+my_comparisons <- list(
+  c("C.albicans_Dominance", "Candida_Other_Dominance"),
+  c("C.albicans_Dominance", "No_Candida_Dominance")
+)
+
+cat("Color scheme: Brown=C.albicans, Pink=Other Candida, Gray=No Dominance\n")
+cat("Comparisons: C.albicans vs. Other Candida | C.albicans vs. No Dominance\n\n")
+
+```
+
+```{r fig_st2_its}
+
+cat("Creating Figure A: sST2\n")
+
+fig_st2_its <- facts_its_rel_analysis %>%
+  filter(!is.na(st2), !is.na(Candida_Dominance_3cat)) %>%
+  ggplot(aes(x = Candida_Dominance_3cat, y = st2, fill = Candida_Dominance_3cat)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = Candida_Dominance_3cat), alpha = 0.5, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = my_comparisons,
+    method = "wilcox.test",
+    label = "p.format",
+    p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = its_colors, labels = its_labels) +
+  scale_color_manual(values = its_colors, labels = its_labels) +
+  scale_y_log10() +
+  scale_x_discrete(labels = c("C.albicans_Dominance" = "C. albicans\nDominance",
+                              "Candida_Other_Dominance" = "Other Candida\nDominance",
+                              "No_Candida_Dominance" = "No Candida\nDominance")) +
+  labs(
+    title = "plasma sST2",
+    x = "",
+    y = "sST2 (pg/mL, log10)"
+  ) +
+  theme_pubr() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 9, face = "bold"),
+    axis.ticks.x = element_line(),
+    plot.title = element_text(size = 11, face = "bold")
+  )
+
+print(fig_st2_its)
+
+```
+
+```{r fig_dp_its}
+
+cat("Creating Figure B: Driving Pressure")
+
+fig_dp_its <- facts_its_rel_analysis %>%
+  filter((group == "ARDS" | group == "AEILD"), 
+         !is.na(drivingpressure_imput), 
+         !is.na(Candida_Dominance_3cat)) %>%
+  ggplot(aes(x = Candida_Dominance_3cat, y = drivingpressure_imput, 
+             fill = Candida_Dominance_3cat)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = Candida_Dominance_3cat), alpha = 0.5, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = my_comparisons,
+    method = "wilcox.test",
+    label = "p.format",
+    p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = its_colors, labels = its_labels) +
+  scale_color_manual(values = its_colors, labels = its_labels) +
+  scale_x_discrete(labels = c("C.albicans_Dominance" = "C. albicans\nDominance",
+                              "Candida_Other_Dominance" = "Other Candida\nDominance",
+                              "No_Candida_Dominance" = "No Candida\nDominance")) +
+  labs(
+    title = "Driving Pressure",
+    x = "",
+    y = "Driving Pressure (cmH₂O)"
+  ) +
+  theme_pubr() +
+  theme(
+    legend.position = "none",
+     axis.text.x = element_text(size = 9, face = "bold"),
+    axis.ticks.x = element_line(),
+    plot.title = element_text(size = 11, face = "bold")
+  )
+
+print(fig_dp_its)
+
+```
+
+```{r fig_vfd_its}
+
+cat("Creating Figure C: VFD\n")
+
+fig_vfd_its <- facts_its_rel_analysis %>%
+  filter(!is.na(VFD), !is.na(Candida_Dominance_3cat)) %>%
+  ggplot(aes(x = Candida_Dominance_3cat, y = VFD, fill = Candida_Dominance_3cat)) +
+  
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA,
+               color = "black", size = 0.5) +
+  geom_beeswarm(aes(color = Candida_Dominance_3cat), alpha = 0.5, size = 2,
+                cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = my_comparisons,
+    method = "wilcox.test",
+    label = "p.format",
+    p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = its_colors, labels = its_labels) +
+  scale_color_manual(values = its_colors, labels = its_labels) +
+  scale_x_discrete(labels = c("C.albicans_Dominance" = "C. albicans\nDominance",
+                              "Candida_Other_Dominance" = "Other Candida\nDominance",
+                              "No_Candida_Dominance" = "No Candida\nDominance")) +
+  labs(
+    title = "Ventilator-Free Days",
+    x = "",
+    y = "VFD (days)"
+  ) +
+  theme_pubr() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 9, face = "bold"),
+    axis.ticks.x = element_line(),
+    plot.title = element_text(size = 11, face = "bold")
+  )
+
+print(fig_vfd_its)
+
+```
+
+```{r its_biomarkers_combined}
+
+cat("\n")
+cat("Combining three figures into single panel...\n\n")
+
+# Combine into 1 row × 3 columns
+fig_its_combined_lunginjury <- plot_grid(
+    fig_dp_its,
+  fig_vfd_its,fig_st2_its,
+  labels = c("A", "B", "C"),
+  label_size = 14,
+  label_fontface = "bold",
+  ncol = 3,
+  rel_widths = c(1, 1, 1)
+)
+
+print(fig_its_combined_lunginjury)
+
+# Save as PDF
+ggsave(
+  file.path(output_dir, "figures", "Figure_ITS_Biomarkers_Combined.pdf"),
+  plot = fig_its_combined_lunginjury,
+  width = 12,
+  height = 4.5,
+  dpi = 300
+)
+
+
+
+```
+
+
+```{r candida_its_by_culture_figures}
+
+library(tidyverse)
+library(ggpubr)
+library(ggbeeswarm)
+
+# Merge ITS data with culture results
+factsalir_cxpos_its_rel <- merge(factsalir_cxpos, relative_3cat, by = "SubjectID", all.x = TRUE)
+factsalir_cxpos_its_abs <- merge(factsalir_cxpos, absolute_3cat, by = "SubjectID", all.x = TRUE)
+
+# Define color palette and comparisons
+culture_colors <- c("BacterialPathogen" = "#00A087", "NRF" = "#3C5488", "Candida" = "#E64B35")
+culture_labels <- c("BacterialPathogen" = "Bacterial\nPathogen", 
+                    "NRF" = "Normal\nFlora", 
+                    "Candida" = "Candida")
+
+pairwise_comparisons <- list(c("Candida", "NRF"), c("Candida", "BacterialPathogen"))
+
+# ===== FIGURE 1: C. albicans Relative Abundance by Culture =====
+fig_calb_rel <- factsalir_cxpos_its_rel %>%
+  filter(!is.na(Calbicans_pct), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = Calbicans_pct, fill = cxres_lrt_f, color = cxres_lrt_f)) +
+  
+  geom_violin(alpha = 0.6, size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", 
+    p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  
+  labs(
+    title = "C. albicans Relative Abundance by Culture Results",
+    x = "",
+    y = "C. albicans Relative Abundance (%)"
+  ) +
+  theme_pubr() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 13, face = "bold")
+  )
+
+print(fig_calb_rel)
+
+ggsave(
+  file.path(output_dir, "figures", "Figure_Calbicans_RelAbund_by_Culture.pdf"),
+  plot = fig_calb_rel,
+  width = 6,
+  height = 5.5,
+  dpi = 300
+)
+
+
+# ===== FIGURE 2: C. albicans Absolute Reads by Culture =====
+fig_calb_abs <- factsalir_cxpos_its_abs %>%
+  filter(!is.na(Calbicans_reads), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = (Calbicans_reads+1), fill = cxres_lrt_f, color = cxres_lrt_f)) +
+  
+  geom_violin(alpha = 0.6, size = 0.5) +
+  geom_beeswarm(aes(color = cxres_lrt_f), alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  
+  stat_compare_means(
+    comparisons = pairwise_comparisons,
+    method = "wilcox.test",
+    label = "p.format", 
+    p.format = list(accuracy = 0.001, scale = 1),
+    tip.length = 0.02,
+    step.increase = 0.1,
+    size = 3.5,
+    bracket.size = 0.4
+  ) +
+  
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  
+  labs(
+    title = "C. albicans Absolute Abundance by Culture Results",
+    x = "",
+    y = "C. albicans ITS Reads (log10)"
+  ) +
+  theme_pubr() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 13, face = "bold")
+  )
+
+print(fig_calb_abs)
+
+ggsave(
+  file.path(output_dir, "figures", "Figure_Calbicans_AbsReads_by_Culture.pdf"),
+  plot = fig_calb_abs,
+  width = 6,
+  height = 5.5,
+  dpi = 300
+)
+
+```
+
+
+################################################################################
+# qPCR DATA INTEGRATION
+#
+# Purpose:
+#   1. Load qPCR dataset
+#   2. Merge with facts_its_rel_analysis (ITS cohort)
+#   3. Create correlation: qPCR vs ITS relative abundance
+#
+################################################################################
+
+```{r qpcr_load and corr plot}
+qpcr_baseline_eta <-read_csv("qpcr_baseline_eta_6.27.26.csv")
+
+# Merge with facts_its_rel_analysis
+facts_its_qpcr <- facts_its_abs_analysis %>%
+  left_join(qpcr_baseline_eta, by = "SubjectIDDay")
+
+facts_its_qpcr$qPCR_fungal_conc <-as.numeric(facts_its_qpcr$qPCR_fungal_conc)
+
+# Publication-quality plot with Spearman correlation
+correlation_plot_final <- facts_its_qpcr %>%
+ # filter(Total_Reads > 0 & qPCR_fungal_conc > 0) %>%  # Remove zeros for log scale
+  ggplot(aes(x = Total_Reads+1, y = qPCR_fungal_conc+1)) + 
+  geom_point(alpha = 0.6, size = 2.5, color = "#2166AC") +
+  geom_smooth(method = "loess", color = "#B2182B", fill = "#B2182B", 
+              alpha = 0.2, linewidth = 1, span = 0.75) + stat_cor() + scale_y_log10() + scale_x_log10()+
+  labs(
+    x = "Total Fungal ITS Reads (log10)",
+    y = "18S rRNA Gene Copies/μL (qPCR, log10)",
+    title = "Correlation Between ITS Sequencing and qPCR Fungal Quantification"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "gray90", linewidth = 0.3),
+    legend.position = "none"
+  ) +
+  annotation_logticks(sides = "bl", size = 0.3)
+
+print(correlation_plot_final)
+ggsave("correlation_plot_final.pdf", width=8, height = 6)
+
+
+```
+
+
+```{r uw_validation_three_panel_IMPROVED}
+
+library(tidyverse)
+library(ggpubr)
+library(ggbeeswarm)
+library(patchwork)
+
+# Load UW data
+uwbal_clean <- read_csv("uwbal_clean_UsedForFacts_9.30.25.csv")
+
+# Rename Yeast to Candida and set order
+uwbal_clean <- uwbal_clean %>%
+  mutate(all_bugs_grouped = as.character(all_bugs_grouped)) %>%
+  mutate(all_bugs_grouped = if_else(all_bugs_grouped == "Yeast", "Candida", all_bugs_grouped)) %>%
+  mutate(all_bugs_grouped = ordered(all_bugs_grouped, 
+                                     levels = c("Saureus", "NoGrowth", "Candida")))
+
+# Filter out NRF (only 3 cases)
+uwbal_clean <- uwbal_clean %>% filter(all_bugs_grouped != "NRF")
+
+# Define comparisons
+my_comparisons <- list(c("Candida", "NoGrowth"), c("Candida", "Saureus"))
+
+# Color palette matching UPMC culture results
+uw_colors <- c("Candida" = "#E64B35", "Saureus" = "#00A087", "NoGrowth" = "#3C5488")
+
+# PANEL A: Driving Pressure
+fig_a <- uwbal_clean %>%
+  filter(bronch_drivingpressure_8am_calculated_2 > 0) %>%
+  ggplot(aes(x = all_bugs_grouped, y = bronch_drivingpressure_8am_calculated_2, 
+             fill = all_bugs_grouped, color = all_bugs_grouped)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, size = 0.5) +
+  geom_beeswarm(alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                     label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+                     tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = uw_colors) + scale_color_manual(values = uw_colors) +
+  labs(title = "Driving Pressure", x = "", y = "Driving Pressure (cmH2O)") +
+  theme_pubr() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold"))
+
+# PANEL B: VFD
+fig_b <- uwbal_clean %>%
+  ggplot(aes(x = all_bugs_grouped, y = vfds_bronch, 
+             fill = all_bugs_grouped, color = all_bugs_grouped)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, size = 0.5) +
+  geom_beeswarm(alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                     label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+                     tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = uw_colors) + scale_color_manual(values = uw_colors) +
+  labs(title = "Ventilator-Free Days", x = "", y = "VFD (days)") +
+  theme_pubr() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold"))
+
+# PANEL C: ICU Mortality
+mort_pct <- uwbal_clean %>%
+  group_by(all_bugs_grouped) %>%
+  summarise(deaths = sum(icu_mortality == 1, na.rm=TRUE),
+            total = n(),
+            pct_mortality = deaths / total * 100, .groups = 'drop')
+
+comparisons <- list(c("Candida", "Saureus"), c("Candida", "NoGrowth"))
+pvals <- sapply(comparisons, function(pair) {
+  mat <- table(uwbal_clean$icu_mortality, uwbal_clean$all_bugs_grouped)[, pair]
+  fisher.test(mat)$p.value
+})
+
+comparison_results <- data.frame(
+  group1 = sapply(comparisons, `[`, 1),
+  group2 = sapply(comparisons, `[`, 2),
+  p_value = pvals,
+  p_label = signif(pvals, 3)
+)
+
+fig_c <- ggplot(mort_pct, aes(x = all_bugs_grouped, y = pct_mortality, fill = all_bugs_grouped)) +
+  geom_col(alpha = 0.7, color = "black", size = 0.5) +
+  geom_text(aes(label = paste0(round(pct_mortality), "%")), vjust = -0.5, fontface = "bold", size = 4) +
+  scale_fill_manual(values = uw_colors) +
+  labs(title = "ICU Mortality", x = "", y = "ICU Mortality (%)") +
+  ylim(0, max(mort_pct$pct_mortality) + 20) +
+  annotate("text", x = 1, y = max(mort_pct$pct_mortality) + 5, 
+           label = paste0("p = ", comparison_results$p_label[1]), size = 3.5) +
+  annotate("text", x = 2, y = max(mort_pct$pct_mortality) + 10, 
+           label = paste0("p = ", comparison_results$p_label[2]), size = 3.5) +
+  theme_pubr() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold"))
+
+# Combine with patchwork
+fig_uw <- fig_a + fig_b + fig_c +
+  plot_annotation(tag_levels = list(c('A', 'B', 'C')),
+                  title = "Respiratory Physiology and Outcome by BAL Culture Results in the UW Cohort",
+                  theme = theme(plot.title = element_text(size = 20, face = "bold")))
+
+print(fig_uw)
+
+ggsave(file.path(output_dir, "figures", "Figure_UW_Validation.pdf"),
+       plot = fig_uw, width = 18, height = 5, dpi = 300)
+
+
+
+# IL-8 variable
+uwbal_clean <- uwbal_clean %>%
+  mutate(il8_bal = `balf_IL-8_proinf_V1_imputed`)
+
+# Color palette matching UPMC culture results
+uw_colors <- c("Candida" = "#E64B35", "Saureus" = "#00A087", "NoGrowth" = "#3C5488")
+
+# Comparisons
+my_comparisons <- list(c("Candida", "NoGrowth"), c("Candida", "Saureus"))
+
+# IL-8 Figure
+fig_il8_uw <- uwbal_clean %>%
+  filter(!is.na(il8_bal)) %>%
+  ggplot(aes(x = all_bugs_grouped, y = il8_bal, 
+             fill = all_bugs_grouped, color = all_bugs_grouped)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, size = 0.5) +
+  geom_beeswarm(alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                     label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+                     tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = uw_colors) + scale_color_manual(values = uw_colors) +
+  scale_y_log10() +
+  labs(title = "BAL IL-8 by BAL Culture Results in UW Cohort", 
+       x = "", y = "IL-8 (pg/mL, log10)") +
+  theme_pubr() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold"))
+
+print(fig_il8_uw)
+
+ggsave(file.path(output_dir, "figures", "Figure_UW_IL8.pdf"),
+       plot = fig_il8_uw, width = 6, height = 6, dpi = 300)
+```
+
+
+```{r eta_neutrophil_elastase_updated}
+
+library(tidyverse)
+library(ggpubr)
+library(ggbeeswarm)
+
+# Define color palette and comparisons (from UPMC culture analysis)
+culture_colors <- c("BacterialPathogen" = "#00A087", "NRF" = "#3C5488", "Candida" = "#E64B35")
+culture_labels <- c("BacterialPathogen" = "Bacterial\nPathogen", 
+                    "NRF" = "Normal\nFlora", 
+                    "Candida" = "Candida")
+
+my_comparisons <- list(c("Candida", "NRF"), c("Candida", "BacterialPathogen"))
+
+# Neutrophil Elastase Figure
+fig_eta_neutelas <- factsalir_cxpos %>%
+  filter(!is.na(NeutElas_eta), !is.na(totProt_ETA), !is.na(cxres_lrt_f)) %>%
+  ggplot(aes(x = cxres_lrt_f, y = NeutElas_eta / totProt_ETA, 
+             fill = cxres_lrt_f, color = cxres_lrt_f)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, size = 0.5) +
+  geom_beeswarm(alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                     label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+                     tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = culture_colors, labels = culture_labels) +
+  scale_color_manual(values = culture_colors, labels = culture_labels) +
+  scale_y_log10() +
+  labs(title = "LRT Neutrophil Elastase by Culture Results",
+       x = "", y = "Neutrophil Elastase / Total Protein (log10)") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold"))
+
+print(fig_eta_neutelas)
+
+ggsave(file.path(output_dir, "figures", "Figure_ETA_NeutrophilElastase_by_Culture.pdf"),
+       plot = fig_eta_neutelas, width = 6, height = 6, dpi = 300)
+
+
+```
+
+
+
+```{r its_biomarker_il8_ang2_tnfr1_combined}
+
+library(tidyverse)
+library(ggpubr)
+library(ggbeeswarm)
+library(patchwork)
+
+# Color palette and labels for C. albicans dominance
+its_colors <- c("C.albicans_Dominance" = "brown3",
+                "Candida_Other_Dominance" = "pink2",
+                "No_Candida_Dominance" = "gray70")
+
+its_labels <- c("C.albicans_Dominance" = "C. albicans\nDominance",
+                "Candida_Other_Dominance" = "Other Candida\nDominance",
+                "No_Candida_Dominance" = "No Candida\nDominance")
+
+# Comparisons
+my_comparisons <- list(
+  c("C.albicans_Dominance", "Candida_Other_Dominance"),
+  c("C.albicans_Dominance", "No_Candida_Dominance")
+)
+
+# PANEL A: IL-8
+fig_a <- facts_its_rel_analysis %>%
+  filter(!is.na(il8), !is.na(Candida_Dominance_3cat)) %>%
+  ggplot(aes(x = Candida_Dominance_3cat, y = il8,
+             fill = Candida_Dominance_3cat, color = Candida_Dominance_3cat)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, size = 0.5) +
+  geom_beeswarm(alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                     label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+                     tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = its_colors, labels = its_labels) +
+  scale_color_manual(values = its_colors, labels = its_labels) +
+  scale_x_discrete(labels = its_labels) +
+  scale_y_log10() +
+  labs(title = "plasma IL-8", x = "", y = "IL-8 (pg/mL, log10)") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 9, face = "bold"),
+        plot.title = element_text(size = 11, face = "bold"))
+
+# PANEL B: Angiopoietin-2
+fig_b <- facts_its_rel_analysis %>%
+  filter(!is.na(ang2), !is.na(Candida_Dominance_3cat)) %>%
+  ggplot(aes(x = Candida_Dominance_3cat, y = ang2,
+             fill = Candida_Dominance_3cat, color = Candida_Dominance_3cat)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, size = 0.5) +
+  geom_beeswarm(alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                     label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+                     tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = its_colors, labels = its_labels) +
+  scale_color_manual(values = its_colors, labels = its_labels) +
+  scale_x_discrete(labels = its_labels) +
+  scale_y_log10() +
+  labs(title = "plasma Angiopoietin-2", x = "", y = "Ang-2 (pg/mL, log10)") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 9, face = "bold"),
+        plot.title = element_text(size = 11, face = "bold"))
+
+# PANEL C: TNFR1
+fig_c <- facts_its_rel_analysis %>%
+  filter(!is.na(tnfr1_final), !is.na(Candida_Dominance_3cat)) %>%
+  ggplot(aes(x = Candida_Dominance_3cat, y = tnfr1_final,
+             fill = Candida_Dominance_3cat, color = Candida_Dominance_3cat)) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, size = 0.5) +
+  geom_beeswarm(alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                     label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+                     tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = its_colors, labels = its_labels) +
+  scale_color_manual(values = its_colors, labels = its_labels) +
+  scale_x_discrete(labels = its_labels) +
+  scale_y_log10() +
+  labs(title = "plasma sTNFR1", x = "", y = "sTNFR1 (pg/mL, log10)") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 9, face = "bold"),
+        plot.title = element_text(size = 11, face = "bold"))
+
+# Combine into single row
+fig_its_inflammatory <- fig_a + fig_b + fig_c +
+  plot_annotation(tag_levels = list(c('A', 'B', 'C')),
+                  title = "Inflammatory Biomarkers by C. albicans Dominance",
+                  theme = theme(plot.title = element_text(size = 14, face = "bold")))
+
+print(fig_its_inflammatory)
+
+ggsave(file.path(output_dir, "figures", "Figure_ITS_Inflammatory_Biomarkers_Combined.pdf"),
+       plot = fig_its_inflammatory, width = 12, height = 4.5, dpi = 300)
+
+
+```
+
+
+```{r clusters_updated_publication}
+
+library(tidyverse)
+library(ggpubr)
+library(ggbeeswarm)
+library(survival)
+library(survminer)
+library(patchwork)
+
+# Load and prepare cluster data
+Mbiome_SampleMetadata_2.24.23 <- read_csv("Mbiome_SampleMetadata_2.24.23.csv")
+MultiCompMbio_all_clusters_allCohorts_2 <- read_csv("MultiCompMbio_all_clusters_allCohorts_2.csv")
+
+clustersMbio <- merge(Mbiome_SampleMetadata_2.24.23, MultiCompMbio_all_clusters_allCohorts_2, 
+                      by = "sample_id", all = TRUE)
+
+clustersMbio_lung_its <- clustersMbio %>%
+  filter(SampleType.x == "ETA") %>%
+  filter(SubjectID %in% facts_its_rel_analysis$SubjectID) %>%
+  filter(Day == 1) %>%
+  group_by(SubjectID) %>%
+  slice_max(total16sreads, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# Merge with facts_its
+facts_its_clusters <- merge(facts_its_rel_analysis, clustersMbio_lung_its, by = "SubjectID", all.x = TRUE)
+
+# Define comparisons
+my_comparisons <- list(c("1", "2"), c("1", "3"))
+
+# Color palette for clusters
+cluster_colors <- c("1" = "brown3", "2" = "pink2", "3" = "steelblue")
+
+# ===== PANEL A: Survival Curve =====
+survival_fit <- survfit(Surv(survival_time90_fromICUAdmission, survival_status90) ~ 
+                        lung_bacterial_fungal_cluster, 
+                        data = facts_its_clusters)
+
+fig_surv <- ggsurvplot(survival_fit, 
+                       pval = TRUE,
+                       pval.method = TRUE,
+                       title = "90-Day Survival by Clusters",
+                       legend.labs = c("Cluster 1", "Cluster 2", "Cluster 3"),
+                       palette = c("brown3", "pink2", "steelblue"),
+                       risk.table = TRUE,
+                       tables.theme = clean_theme(),
+                       legend.title = "Clusters",
+                       font.legend = c(10, "bold", "black"),
+                       font.title = c(12, "bold", "black"),
+                       xlab = "Days Post ICU Admission",
+                       ylab = "Probability of Survival",   
+                       xlim = c(0, 90),  # ← LIMIT X-AXIS TO 90 DAYS
+                       break.time.by = 15,  # ← NICE SPACING
+                       size = 1.2)
+
+# ===== PANEL B: C. albicans Abundance =====
+fig_calb <- facts_its_clusters %>%
+  filter(!is.na(lung_bacterial_fungal_cluster)) %>%
+  ggplot(aes(x = as.factor(lung_bacterial_fungal_cluster), y = Calbicans_pct,
+             fill = as.factor(lung_bacterial_fungal_cluster),
+             color = as.factor(lung_bacterial_fungal_cluster))) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, size = 0.5) +
+  geom_beeswarm(alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                     label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+                     tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = cluster_colors) +
+  scale_color_manual(values = cluster_colors) +
+  labs(title = "C. albicans Abundance",
+       x = "Bacterial-Fungal Cluster", y = "C. albicans Relative Abundance (%)") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 11, face = "bold"),
+        plot.title = element_text(size = 12, face = "bold"))
+
+# ===== PANEL C: Bacterial Pathogen Abundance =====
+fig_pathogen <- facts_its_clusters %>%
+  filter(!is.na(lung_bacterial_fungal_cluster)) %>%
+  ggplot(aes(x = as.factor(lung_bacterial_fungal_cluster), y = PathogenSum,
+             fill = as.factor(lung_bacterial_fungal_cluster),
+             color = as.factor(lung_bacterial_fungal_cluster))) +
+  geom_boxplot(width = 0.4, alpha = 0.7, outlier.shape = NA, size = 0.5) +
+  geom_beeswarm(alpha = 0.5, size = 2, cex = 2, corral = "wrap") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                     label = "p.format", p.format = list(accuracy = 0.001, scale = 1),
+                     tip.length = 0.02, step.increase = 0.1, size = 3.5, bracket.size = 0.4) +
+  scale_fill_manual(values = cluster_colors) +
+  scale_color_manual(values = cluster_colors) +
+  labs(title = "Bacterial Pathogen Abundance",
+       x = "Bacterial-Fungal Cluster", y = "Pathogen Relative Abundance (%)") +
+  theme_pubr() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 11, face = "bold"),
+        plot.title = element_text(size = 12, face = "bold"))
+
+# ===== COMBINE: Abundance panels (top) + Survival (bottom) =====
+abundance_combined <- fig_calb + fig_pathogen +
+  plot_annotation(tag_levels = list(c('A', 'B')),
+                  theme = theme(plot.title = element_text(size = 13, face = "bold")))
+
+# Survival with risk table
+surv_with_risk <- plot_grid(
+  fig_surv$plot,
+  fig_surv$table,
+  ncol = 1,
+  align = "v",
+  axis = "lr",
+  rel_heights = c(3, 1)
+)
+
+# Final combined figure
+fig_clusters_final <- (abundance_combined / surv_with_risk) +
+  plot_annotation(title = "Integrated Bacterial-Fungal Clusters and Clinical Outcomes",
+                  theme = theme(plot.title = element_text(size = 14, face = "bold")))
+
+print(fig_clusters_final)
+
+# Save
+ggsave(file.path(output_dir, "figures", "Figure_Clusters_Combined.pdf"),
+       plot = fig_clusters_final, width = 10, height = 10, dpi = 300)
+
+```
+
+```{r clusters and cultures}
+# ===== LOAD AND PREPARE DATA =====
+clustersMbio_lung_cxpos <- clustersMbio %>%
+  filter(SampleType.x == "ETA") %>%
+  filter(SubjectID %in% factsalir_cxpos$SubjectID) %>%
+  filter(Day == 1) %>%
+  group_by(SubjectID) %>%
+  slice_max(total16sreads, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+clustersMbio_lung_cxpos <- merge(clustersMbio_lung_cxpos, factsalir_cxpos, 
+                                 by = "SubjectID", all.x = TRUE)
+
+
+# ===== CONTINGENCY TABLE =====
+culture_cluster_table <- table(clustersMbio_lung_cxpos$cxres_lrt_f, 
+                              clustersMbio_lung_cxpos$lung_bacterial_fungal_cluster)
+
+cat("\n════════════════════════════════════════════════════════════════════════════\n")
+cat("CULTURE RESULTS vs. BACTERIAL-FUNGAL CLUSTERS\n")
+cat("════════════════════════════════════════════════════════════════════════════\n\n")
+print(culture_cluster_table)
+
+# Calculate percentages
+culture_cluster_pct <- prop.table(culture_cluster_table, margin = 1) * 100
+
+cat("\n\nPERCENTAGES WITHIN EACH CULTURE CATEGORY:\n\n")
+print(round(culture_cluster_pct, 1))
+
+# ===== PREPARE DATA FOR VISUALIZATION =====
+culture_cluster_data <- as.data.frame(culture_cluster_table) %>%
+  rename(Culture = Var1, Cluster = Var2, Count = Freq) %>%
+  group_by(Culture) %>%
+  mutate(Pct = 100 * Count / sum(Count),
+         Total = sum(Count)) %>%
+  ungroup()
+
+# ===== STACKED BAR CHART =====
+fig_culture_cluster <- culture_cluster_data %>%
+  mutate(Culture = factor(Culture, levels = c("NRF", "BacterialPathogen", "Candida")),
+         Cluster = factor(Cluster, levels = c("1", "2", "3"))) %>%
+  ggplot(aes(x = Culture, y = Count, fill = Cluster)) +
+  geom_col(alpha = 0.8, color = "black", size = 0.5) +
+  
+  # Add percentage labels
+  geom_text(aes(label = sprintf("%.0f%%\n(n=%d)", Pct, Count)),
+            position = position_stack(vjust = 0.5),
+            fontface = "bold", size = 3.5, color = "white") +
+  
+  scale_fill_manual(
+    values = c("1" = "brown3", "2" = "pink2", "3" = "steelblue")
+  ) +
+  
+  scale_y_continuous(expand = c(0, 0)) +
+  
+  labs(
+    title = "Clinical Culture Categories and Integrative Bacterial-Fungal Clusters",
+        x = "Clinical Culture Result",
+    y = "Number of Subjects",
+    fill = "16S-ITS Clusters"
+  ) +
+  
+  theme_pubr() +
+  theme(
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 11, face = "italic"),
+    axis.title = element_text(size = 11, face = "bold"),
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.position = "right"
+  )
+
+print(fig_culture_cluster)
+
+# ===== SAVE =====
+ggsave(
+  file.path(output_dir, "figures", "FigureSUPP_Culture_vs_Clusters_Overlap.pdf"),
+  plot = fig_culture_cluster,
+  width = 8,
+  height = 5.5,
+  dpi = 300
+)
+
+
+```
